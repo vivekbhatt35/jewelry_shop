@@ -1,25 +1,32 @@
-version: '3.8'
-
 services:
   detector-pose:
     build: 
-      context: ./detector_pose
+      context: .
+      dockerfile: detector_pose/Dockerfile
     ports:
       - "8011:8011"
     volumes:
-      - ./output_image:/app/output_image
+      - shared_images:/app/output_image
+      - ./logs:/app/logs
     environment:
       - ALERT_SERVICE_URL=http://alert-logic:8012/alert
+      - PYTHONPATH=/app
+      - OUTPUT_DIR=/app/output_image
     networks:
       - pose-net
 
   alert-logic:
     build: 
-      context: ./alert_logic
+      context: .
+      dockerfile: alert_logic/Dockerfile
     ports:
       - "8012:8012"
     volumes:
-      - ./output_image:/app/output_image
+      - shared_images:/app/output_image
+      - ./logs:/app/logs
+    environment:
+      - PYTHONPATH=/app
+      - OUTPUT_DIR=/app/output_image
     networks:
       - pose-net
 
@@ -28,4 +35,5 @@ networks:
     driver: bridge
 
 volumes:
-  output_image:
+  shared_images:
+  logs:

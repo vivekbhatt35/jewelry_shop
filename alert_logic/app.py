@@ -8,7 +8,7 @@ import json
 import uuid
 
 app = FastAPI()
-OUTPUT_DIR = "output_image"
+OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'output_image')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 @app.post("/alert")
@@ -23,7 +23,11 @@ async def create_alert(
     try:
         poses_list = json.loads(poses)
         
-        # Ensure image path exists
+        # Use shared volume path
+        if not image_source.startswith('/app/output_image'):
+            image_source = os.path.join('/app/output_image', os.path.basename(image_source))
+        
+        # Ensure image path exists and is readable
         if not os.path.exists(image_source):
             return JSONResponse(content={
                 "error": f"Image not found: {image_source}",
@@ -33,7 +37,7 @@ async def create_alert(
         base_img = cv2.imread(image_source)
         if base_img is None:
             return JSONResponse(content={
-                "error": "Failed to load image",
+                "error": f"Failed to load image: {image_source}",
                 "path_checked": image_source
             }, status_code=400)
 
@@ -53,7 +57,7 @@ async def create_alert(
         if result_alerts:
             unique_id = str(uuid.uuid4())
             file_name = f"alertoverlay_{unique_id}.jpg"
-            saved_overlay_path = os.path.join(OUTPUT_DIR, file_name)
+            saved_overlay_path = os.path.join("/app/output_image", file_name)
             cv2.imwrite(saved_overlay_path, base_img)
 
         return JSONResponse(content={
