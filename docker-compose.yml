@@ -6,14 +6,16 @@ services:
     ports:
       - "8011:8011"
     volumes:
-      - shared_images:/app/output_image
-      - ./logs:/app/logs
+      - ./output_image:/app/output_image:rw
+      - ./logs:/app/logs:rw
     environment:
       - ALERT_SERVICE_URL=http://alert-logic:8012/alert
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
+      - YOLO_CONFIG_DIR=/app/detector_pose/.config/Ultralytics
     networks:
       - pose-net
+    user: "1000:1000"
 
   alert-logic:
     build: 
@@ -22,18 +24,17 @@ services:
     ports:
       - "8012:8012"
     volumes:
-      - shared_images:/app/output_image
-      - ./logs:/app/logs
+      - ./output_image:/app/output_image:rw
+      - ./logs:/app/logs:rw
     environment:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
     networks:
-      - pose-net
+      - pose-net  # Changed from 'pose' to 'pose-net' to match
 
 networks:
   pose-net:
     driver: bridge
 
 volumes:
-  shared_images:
   logs:

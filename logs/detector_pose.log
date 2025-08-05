@@ -1,6 +1,0 @@
-2025-08-05 06:09:45,063 - detector_pose - INFO - Processing image from camera CAM_001
-2025-08-05 06:09:46,687 - detector_pose - INFO - Detected 1 persons in image
-2025-08-05 06:09:46,712 - detector_pose - INFO - Alert service response received
-2025-08-05 06:10:58,521 - detector_pose - INFO - Processing image from camera CAM_001
-2025-08-05 06:10:59,295 - detector_pose - INFO - Detected 12 persons in image
-2025-08-05 06:10:59,336 - detector_pose - INFO - Alert service response received

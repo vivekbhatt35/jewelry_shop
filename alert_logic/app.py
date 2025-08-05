@@ -23,9 +23,8 @@ async def create_alert(
     try:
         poses_list = json.loads(poses)
         
-        # Use shared volume path
-        if not image_source.startswith('/app/output_image'):
-            image_source = os.path.join('/app/output_image', os.path.basename(image_source))
+        # Convert to relative path
+        image_source = os.path.join(OUTPUT_DIR, os.path.basename(image_source))
         
         # Ensure image path exists and is readable
         if not os.path.exists(image_source):
@@ -57,7 +56,7 @@ async def create_alert(
         if result_alerts:
             unique_id = str(uuid.uuid4())
             file_name = f"alertoverlay_{unique_id}.jpg"
-            saved_overlay_path = os.path.join("/app/output_image", file_name)
+            saved_overlay_path = os.path.join(OUTPUT_DIR, file_name)
             cv2.imwrite(saved_overlay_path, base_img)
 
         return JSONResponse(content={

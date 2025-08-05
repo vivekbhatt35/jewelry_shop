@@ -29,6 +29,7 @@ if model_path is None:
     raise RuntimeError("No .pt model file found in models/ directory.")
 model = YOLO(model_path)
 
+# Update paths to be relative to OUTPUT_DIR
 @app.post("/pose/image")
 async def pose_from_image(
     file: UploadFile = File(...),
@@ -40,9 +41,9 @@ async def pose_from_image(
     file_ext = os.path.splitext(file.filename)[1]
     base_filename = f"{timestamp}_{camera_id}{file_ext}"
     
-    # Use shared volume paths
-    source_path = os.path.join("/app/output_image", f"source_{base_filename}")
-    temp_path = os.path.join("/app/output_image", f"temp_{base_filename}")
+    # Use relative paths with OUTPUT_DIR
+    source_path = os.path.join(OUTPUT_DIR, f"source_{base_filename}")
+    temp_path = os.path.join(OUTPUT_DIR, f"temp_{base_filename}")
     
     # Save uploaded file
     contents = await file.read()
@@ -99,13 +100,14 @@ async def pose_from_image(
     overlay_path = None
     if output_image == 1:
         overlay_name = f"overlay_{base_filename}"
-        overlay_path = os.path.join("/app/output_image", overlay_name)
+        overlay_path = os.path.join(OUTPUT_DIR, overlay_name)
         cv2.imwrite(overlay_path, overlay_img)
 
     # Cleanup temp file
     if os.path.exists(temp_path):
         os.remove(temp_path)
 
+    # Use relative paths in response
     response = {
         "camera_id": camera_id,
         "timestamp": datetime.now().isoformat(),
