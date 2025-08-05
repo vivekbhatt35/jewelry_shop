@@ -3,11 +3,19 @@ import cv2
 import shutil
 import numpy as np
 from datetime import datetime
+import pytz
 from fastapi import FastAPI, File, UploadFile, Form
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
 import requests
 import json
+from utils.logger import setup_logger
+
+# Set up logger
+logger = setup_logger("Detector-Pose")
+
+# Define India timezone
+india_tz = pytz.timezone('Asia/Kolkata')
 
 app = FastAPI()
 
@@ -26,18 +34,23 @@ def get_model_path(model_folder):
 
 model_path = get_model_path(MODEL_FOLDER)
 if model_path is None:
+    logger.error("No .pt model file found in models/ directory.")
     raise RuntimeError("No .pt model file found in models/ directory.")
-model = YOLO(model_path)
 
-# Update paths to be relative to OUTPUT_DIR
+logger.info(f"Loading model from {model_path}")
+model = YOLO(model_path)
+logger.info("Model loaded successfully")
+
 @app.post("/pose/image")
 async def pose_from_image(
     file: UploadFile = File(...),
     output_image: int = Form(0),
     camera_id: str = Form(...)
 ):
-    # Create a timestamp-based filename to avoid conflicts
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger.info(f"Processing image from camera {camera_id}")
+    
+    # Create a timestamp-based filename with India timezone
+    timestamp = datetime.now(india_tz).strftime("%Y%m%d_%H%M%S")
     file_ext = os.path.splitext(file.filename)[1]
     base_filename = f"{timestamp}_{camera_id}{file_ext}"
     
@@ -46,15 +59,23 @@ async def pose_from_image(
     temp_path = os.path.join(OUTPUT_DIR, f"temp_{base_filename}")
     
     # Save uploaded file
-    contents = await file.read()
-    with open(temp_path, "wb") as f:
-        f.write(contents)
+    try:
+        contents = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        logger.debug(f"Saved temporary file to {temp_path}")
+    except Exception as e:
+        logger.error(f"Error saving uploaded file: {str(e)}")
+        return JSONResponse(content={
+            "error": f"Error saving uploaded file: {str(e)}"
+        }, status_code=500)
     
     # Read and process image
     img = cv2.imread(temp_path)
     if img is None:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        logger.error(f"Failed to read uploaded image at {temp_path}")
         return JSONResponse(content={
             "error": "Failed to read uploaded image",
             "path_checked": temp_path
@@ -62,9 +83,20 @@ async def pose_from_image(
 
     # Save source image first for alert service
     cv2.imwrite(source_path, img)
+    logger.debug(f"Saved source image to {source_path}")
     
     # Process image with YOLO
-    results = model(img)
+    try:
+        results = model(img)
+        logger.debug("YOLO processing completed")
+    except Exception as e:
+        logger.error(f"Error during YOLO processing: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return JSONResponse(content={
+            "error": f"Error during YOLO processing: {str(e)}"
+        }, status_code=500)
+    
     poses = []
     overlay_img = img.copy()
 
@@ -88,9 +120,12 @@ async def pose_from_image(
                 if v_value > 0:
                     cv2.circle(overlay_img, (int(x), int(y)), 4, (0, 255, 0), -1)
             poses.append(person_kps[:, :3].astype(int).flatten().tolist())
+        
+        logger.info(f"Detected {len(poses)} persons in image")
     else:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        logger.info("No keypoints found in image")
         return JSONResponse(content={
             "error": "No keypoints found in image.",
             "poses": [],
@@ -102,15 +137,16 @@ async def pose_from_image(
         overlay_name = f"overlay_{base_filename}"
         overlay_path = os.path.join(OUTPUT_DIR, overlay_name)
         cv2.imwrite(overlay_path, overlay_img)
+        logger.debug(f"Saved overlay image to {overlay_path}")
 
     # Cleanup temp file
     if os.path.exists(temp_path):
         os.remove(temp_path)
 
-    # Use relative paths in response
+    # Use India timezone in response
     response = {
         "camera_id": camera_id,
-        "timestamp": datetime.now().isoformat(),
+        "timestamp": datetime.now(india_tz).isoformat(),
         "poses": poses,
         "source_image": source_path
     }
@@ -128,14 +164,17 @@ async def pose_from_image(
             "poses": json.dumps(poses)
         }
         
+        logger.debug(f"Sending request to alert service: {ALERT_SERVICE_URL}")
         alert_response = requests.post(
             ALERT_SERVICE_URL,
             data=alert_payload,
-            timeout=10  # increased timeout
+            timeout=10
         )
         response["alert_status"] = alert_response.json()
+        logger.info("Alert service response received")
     except Exception as e:
-        response["alert_status"] = {"error": str(e)}
-        print(f"Alert service error: {str(e)}")  # Add logging
+        error_msg = f"Alert service error: {str(e)}"
+        response["alert_status"] = {"error": error_msg}
+        logger.error(error_msg)
 
     return JSONResponse(content=response)

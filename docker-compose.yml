@@ -13,8 +13,9 @@ services:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
       - YOLO_CONFIG_DIR=/app/detector_pose/.config/Ultralytics
+      - LOG_DIR=/app/logs
     networks:
-      - pose-net
+      - pose-network
     user: "1000:1000"
 
   alert-logic:
@@ -29,12 +30,11 @@ services:
     environment:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
+      - LOG_DIR=/app/logs
     networks:
-      - pose-net  # Changed from 'pose' to 'pose-net' to match
+      - pose-network
+    user: "1000:1000"
 
 networks:
-  pose-net:
+  pose-network:
     driver: bridge
-
-volumes:
-  logs:
