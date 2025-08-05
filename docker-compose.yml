@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  detector-pose:
+    build: 
+      context: ./detector_pose
+    ports:
+      - "8011:8011"
+    volumes:
+      - ./output_image:/app/output_image
+    environment:
+      - ALERT_SERVICE_URL=http://alert-logic:8012/alert
+    networks:
+      - pose-net
+
+  alert-logic:
+    build: 
+      context: ./alert_logic
+    ports:
+      - "8012:8012"
+    volumes:
+      - ./output_image:/app/output_image
+    networks:
+      - pose-net
+
+networks:
+  pose-net:
+    driver: bridge
+
+volumes:
+  output_image:

@@ -3,3 +3,4 @@ uvicorn
 opencv-python
 ultralytics
 python-multipart
+requests

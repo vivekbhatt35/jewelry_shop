@@ -22,39 +22,52 @@ async def create_alert(
 ):
     try:
         poses_list = json.loads(poses)
-    except Exception:
-        return JSONResponse(content={"error": "Invalid poses data"}, status_code=400)
+        
+        # Ensure image path exists
+        if not os.path.exists(image_source):
+            return JSONResponse(content={
+                "error": f"Image not found: {image_source}",
+                "path_checked": image_source
+            }, status_code=400)
 
-    # Load the image to draw overlays
-    base_img = cv2.imread(image_source)
-    if base_img is None:
-        return JSONResponse(content={"error": "Image could not be loaded"}, status_code=400)
+        base_img = cv2.imread(image_source)
+        if base_img is None:
+            return JSONResponse(content={
+                "error": "Failed to load image",
+                "path_checked": image_source
+            }, status_code=400)
 
-    # Analyze for hands up
-    person_alert_indices = hands_up_detect(poses_list)
-    result_alerts = ["Hands_Up"] if person_alert_indices else []
+        # Analyze for hands up
+        person_alert_indices = hands_up_detect(poses_list)
+        result_alerts = ["Hands_Up"] if person_alert_indices else []
 
-    # Draw bounding boxes for alerted persons
-    image_bb = []
-    if person_alert_indices:
-        person_bboxes = get_person_bboxes(poses_list)
-        base_img = draw_bboxes(base_img, person_bboxes, person_alert_indices, color=(0, 0, 255))
-        image_bb = [person_bboxes[idx] for idx in person_alert_indices]
+        # Draw bounding boxes for alerted persons
+        image_bb = []
+        if person_alert_indices:
+            person_bboxes = get_person_bboxes(poses_list)
+            base_img = draw_bboxes(base_img, person_bboxes, person_alert_indices, color=(0, 0, 255))
+            image_bb = [person_bboxes[idx] for idx in person_alert_indices]
 
-    # Save new overlay if we have alerts
-    saved_overlay_path = None
-    if result_alerts:
-        unique_id = str(uuid.uuid4())
-        file_name = f"alertoverlay_{unique_id}.jpg"
-        saved_overlay_path = os.path.join(OUTPUT_DIR, file_name)
-        cv2.imwrite(saved_overlay_path, base_img)
+        # Save new overlay if we have alerts
+        saved_overlay_path = None
+        if result_alerts:
+            unique_id = str(uuid.uuid4())
+            file_name = f"alertoverlay_{unique_id}.jpg"
+            saved_overlay_path = os.path.join(OUTPUT_DIR, file_name)
+            cv2.imwrite(saved_overlay_path, base_img)
 
-    return JSONResponse(content={
-        "type_of_alert": ",".join(result_alerts) if result_alerts else "No_Alert",
-        "SourceID": camera_id,
-        "Detection_type": detection_type,
-        "date_Time": date_time,
-        "Image_source": image_source,
-        "Image_overlay": saved_overlay_path,
-        "Image_bb": image_bb if image_bb else None
-    })
+        return JSONResponse(content={
+            "type_of_alert": ",".join(result_alerts) if result_alerts else "No_Alert",
+            "SourceID": camera_id,
+            "Detection_type": detection_type,
+            "date_Time": date_time,
+            "Image_source": image_source,
+            "Image_overlay": saved_overlay_path,
+            "Image_bb": image_bb if image_bb else None
+        })
+
+    except Exception as e:
+        return JSONResponse(content={
+            "error": f"Processing error: {str(e)}",
+            "path_checked": image_source if 'image_source' in locals() else None
+        }, status_code=500)

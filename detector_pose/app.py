@@ -15,7 +15,8 @@ MODEL_FOLDER = "models"
 OUTPUT_DIR = "output_image"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-ALERT_SERVICE_URL = "http://localhost:8012/alert"  # adjust port as needed
+# Update alert service URL to use environment variable
+ALERT_SERVICE_URL = os.getenv('ALERT_SERVICE_URL', 'http://alert-logic:8012/alert')
 
 def get_model_path(model_folder):
     for fname in os.listdir(model_folder):
@@ -85,13 +86,17 @@ async def pose_from_image(
     if overlay_path:
         response["overlay_image_path"] = overlay_path
 
+    # Save image for alert service
+    shared_image_path = os.path.join(OUTPUT_DIR, f"source_{file.filename}")
+    cv2.imwrite(shared_image_path, img)
+
     # Forward to alert service
     try:
         alert_payload = {
             "camera_id": camera_id,
             "detection_type": "poses",
             "date_time": response["timestamp"],
-            "image_source": temp_path,  # original image
+            "image_source": shared_image_path,
             "image_overlay": overlay_path if overlay_path else None,
             "poses": json.dumps(poses)
         }
@@ -99,10 +104,11 @@ async def pose_from_image(
         alert_response = requests.post(
             ALERT_SERVICE_URL,
             data=alert_payload,
-            timeout=5
+            timeout=10  # increased timeout
         )
         response["alert_status"] = alert_response.json()
     except Exception as e:
         response["alert_status"] = {"error": str(e)}
+        print(f"Alert service error: {str(e)}")  # Add logging
 
     return JSONResponse(content=response)
