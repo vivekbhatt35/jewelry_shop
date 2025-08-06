@@ -1,22 +1,46 @@
-# Stage 1: Build (install packages into /root/.local)
-FROM python:3.12-slim AS builder
+# Stage 1: Build dependencies
+FROM python:3.12-slim-bookworm AS builder
+
 WORKDIR /app
 
-# Install requirements and set permissions
+# Install build dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install requirements
 COPY alert_logic/requirements.txt requirements.txt
 RUN pip install --user --no-cache-dir -r requirements.txt && \
     chmod -R 777 /root/.local
 
-# Stage 2: Minimal final image
-FROM python:3.12-slim
+# Stage 2: Runtime
+FROM python:3.12-slim-bookworm
+
 WORKDIR /app
 
-# Create non-root user
+# Install runtime dependencies for OpenCV
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libgl1-mesa-glx \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user and ensure directories have correct permissions
 RUN useradd -m -u 1000 appuser && \
     mkdir -p /app/output_image /app/logs && \
+    chmod -R 777 /app/output_image /app/logs && \
     chown -R appuser:appuser /app
 
+# Copy dependencies from builder
 COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
+
+# Copy application code
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser alert_logic/ alert_logic/
 WORKDIR /app/alert_logic
