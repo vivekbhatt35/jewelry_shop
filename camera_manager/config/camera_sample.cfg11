@@ -1,0 +1,15 @@
+[camera]
+camera_id = CAM_001
+extract_interval = 5
+# Use either rtsp_url or video_path based on your source
+rtsp_url = rtsp://username:password@camera-ip:554/stream
+video_path = 
+# Where to store captured frames
+image_path = /app/output_image
+# Source type: 'rtsp' or 'file'
+source_type = rtsp
+
+[analytics]
+enabled = true
+pose_detection = true
+object_detection = true

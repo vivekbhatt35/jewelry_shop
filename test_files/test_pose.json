@@ -1,0 +1,26 @@
+[
+  {
+    "person_id": "test_person_123",
+    "keypoints": [
+      {"name": "nose", "x": 100, "y": 50, "v": 0.9},
+      {"name": "left_eye", "x": 85, "y": 40, "v": 0.9},
+      {"name": "right_eye", "x": 115, "y": 40, "v": 0.9},
+      {"name": "left_ear", "x": 75, "y": 45, "v": 0.9},
+      {"name": "right_ear", "x": 125, "y": 45, "v": 0.9},
+      {"name": "left_shoulder", "x": 70, "y": 100, "v": 0.9},
+      {"name": "right_shoulder", "x": 130, "y": 100, "v": 0.9},
+      {"name": "left_elbow", "x": 60, "y": 70, "v": 0.9},
+      {"name": "right_elbow", "x": 140, "y": 70, "v": 0.9},
+      {"name": "left_wrist", "x": 50, "y": 40, "v": 0.9},
+      {"name": "right_wrist", "x": 150, "y": 40, "v": 0.9},
+      {"name": "left_hip", "x": 85, "y": 150, "v": 0.9},
+      {"name": "right_hip", "x": 115, "y": 150, "v": 0.9},
+      {"name": "left_knee", "x": 80, "y": 200, "v": 0.9},
+      {"name": "right_knee", "x": 120, "y": 200, "v": 0.9},
+      {"name": "left_ankle", "x": 75, "y": 250, "v": 0.9},
+      {"name": "right_ankle", "x": 125, "y": 250, "v": 0.9}
+    ],
+    "bbox": [50, 30, 150, 250],
+    "score": 0.95
+  }
+]

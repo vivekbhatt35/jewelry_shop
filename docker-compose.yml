@@ -1,6 +1,31 @@
 version: '3.8'
 
 services:
+  camera-manager:
+    build: 
+      context: .
+      dockerfile: camera_manager/Dockerfile
+    ports:
+      - "8010:8010"
+    volumes:
+      - ./output_image:/app/output_image:rw
+      - ./camera_manager/config:/app/camera_manager/config:rw
+      - ./logs:/app/logs:rw
+      - ./videos:/app/videos:ro  # Mount videos folder for local video files
+    environment:
+      - POSE_SERVICE_URL=http://detector-pose:8011/pose/image
+      - DETECTION_SERVICE_URL=http://detector-detections:8013/detect/image
+      - PYTHONPATH=/app
+      - CONFIG_DIR=/app/camera_manager/config
+      - OUTPUT_DIR=/app/output_image
+      - LOG_DIR=/app/logs
+    depends_on:
+      - detector-pose
+      - detector-detections
+    restart: unless-stopped
+    networks:
+      - pose-network
+      
   detector-pose:
     build: 
       context: .
@@ -50,6 +75,8 @@ services:
       - LOG_DIR=/app/logs
     networks:
       - pose-network
+
+# Camera-orchestrator service has been replaced by camera-manager
 
 networks:
   pose-network:

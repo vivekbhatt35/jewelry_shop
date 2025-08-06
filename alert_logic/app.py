@@ -8,7 +8,10 @@ import cv2
 import os
 import json
 import uuid
+import threading
+import time
 from utils.logger import setup_logger
+from image_cleaner import ImageCleaner
 
 # Set up logger
 logger = setup_logger("Alert-Logic")
@@ -132,8 +135,36 @@ async def create_alert(
         saved_overlay_path = None
         if result_alerts and result_alerts != ["Unknown_Detection_Type"] and base_img is not None and base_img.size > 0:
             try:
-                unique_id = str(uuid.uuid4())
-                file_name = f"alertoverlay_{unique_id}.jpg"
+                # Create more descriptive filename with camera_id, time, alert type
+                alert_type_str = '_'.join(result_alerts)
+                # Format datetime with shorter format for filename (just time)
+                try:
+                    # Try parsing with the expected format first
+                    dt_obj = datetime.strptime(date_time, "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    # If that fails, try ISO format with T separator and timezone
+                    try:
+                        dt_obj = datetime.fromisoformat(date_time)
+                    except ValueError:
+                        # Last resort: just extract time from the string if it contains T separator
+                        if "T" in date_time:
+                            time_part = date_time.split("T")[1][:6]  # Get HHMMSS
+                            formatted_dt = time_part.replace(":", "")
+                            logger.debug(f"Extracted time from ISO string: {formatted_dt}")
+                        else:
+                            # If all parsing fails, use current time
+                            dt_obj = datetime.now()
+                            formatted_dt = dt_obj.strftime("%H%M%S")
+                            logger.debug(f"Using current time as fallback: {formatted_dt}")
+                        
+                if not locals().get('formatted_dt'):
+                    formatted_dt = dt_obj.strftime("%H%M%S")  # Just use hours, minutes, seconds
+                
+                # Use a simpler file naming scheme without timezone and person_id
+                # Old format: alert_{camera_id}_{full_datetime}_{person_id}_{alert_type}.jpg
+                # New format: alert_{camera_id}_{HHMMSS}_{alert_type}.jpg
+                
+                file_name = f"alert_{camera_id}_{formatted_dt}_{alert_type_str}.jpg"
                 saved_overlay_path = os.path.join(OUTPUT_DIR, file_name)
                 
                 logger.debug(f"Saving overlay image to {saved_overlay_path}, image shape: {base_img.shape}")
@@ -160,6 +191,33 @@ async def create_alert(
         else:
             if not result_alerts:
                 logger.debug("No alerts to save overlay for")
+                
+                # Delete source and overlay images since no alert was generated
+                try:
+                    # Extract the base names for source and overlay images
+                    source_base = os.path.basename(image_path)
+                    overlay_base = None
+                    
+                    if image_overlay and os.path.exists(image_overlay):
+                        overlay_base = os.path.basename(image_overlay)
+                    
+                    # Only delete if the source image is in the expected directory
+                    if source_base.startswith("source_"):
+                        logger.info(f"Deleting unused source image: {source_base}")
+                        if os.path.exists(image_path):
+                            os.remove(image_path)
+                            logger.debug(f"Deleted source image: {image_path}")
+                    
+                    # Delete corresponding overlay image if it exists
+                    if overlay_base and overlay_base.startswith("overlay_"):
+                        overlay_path = os.path.join(OUTPUT_DIR, overlay_base)
+                        if os.path.exists(overlay_path):
+                            logger.info(f"Deleting unused overlay image: {overlay_base}")
+                            os.remove(overlay_path)
+                            logger.debug(f"Deleted overlay image: {overlay_path}")
+                except Exception as e:
+                    logger.error(f"Error deleting unused images: {str(e)}")
+                    logger.exception("Detailed image deletion exception:")
             elif base_img is None or base_img.size == 0:
                 logger.error("Cannot save overlay: base_img is None or empty")
 
@@ -206,5 +264,51 @@ async def health_check():
         logger.error(f"Health check failed: {str(e)}")
         return JSONResponse(
             content={"status": "unhealthy", "error": str(e)},
+            status_code=500
+        )
+
+# Background cleanup task
+def periodic_cleanup(interval_minutes=60, min_age_minutes=30):
+    """Run cleanup task periodically"""
+    while True:
+        try:
+            time.sleep(interval_minutes * 60)  # Convert minutes to seconds
+            logger.info(f"Starting scheduled cleanup (runs every {interval_minutes} minutes)")
+            cleaner = ImageCleaner(OUTPUT_DIR, min_age_minutes)
+            deleted_count = cleaner.cleanup(dry_run=False)
+            logger.info(f"Scheduled cleanup completed: {deleted_count} files deleted")
+        except Exception as e:
+            logger.error(f"Error in scheduled cleanup: {str(e)}")
+            logger.exception("Detailed cleanup exception:")
+
+# Start the background cleanup thread
+cleanup_thread = threading.Thread(
+    target=periodic_cleanup, 
+    args=(60, 30),  # Run every 60 minutes, clean files older than 30 minutes
+    daemon=True
+)
+cleanup_thread.start()
+logger.info("Background image cleanup task started")
+
+@app.post("/cleanup")
+async def trigger_cleanup(min_age_minutes: int = 30, dry_run: bool = False):
+    """Manually trigger cleanup of unused images"""
+    try:
+        logger.info(f"Manual cleanup triggered: min_age_minutes={min_age_minutes}, dry_run={dry_run}")
+        cleaner = ImageCleaner(OUTPUT_DIR, min_age_minutes)
+        deleted_count = cleaner.cleanup(dry_run)
+        
+        return {
+            "status": "success",
+            "message": f"Cleanup {'simulation' if dry_run else 'operation'} completed",
+            "deleted_count": deleted_count,
+            "dry_run": dry_run
+        }
+    except Exception as e:
+        error_msg = f"Cleanup error: {str(e)}"
+        logger.error(error_msg)
+        logger.exception("Detailed exception information:")
+        return JSONResponse(
+            content={"status": "error", "error": error_msg},
             status_code=500
         )

@@ -2,8 +2,69 @@ import cv2
 import numpy as np
 import logging
 import os
+import time
+import datetime
 
 logger = logging.getLogger("Alert-Logic")
+
+# Global alert throttling settings
+GLOBAL_ALERT_COOLDOWN = 30  # 30 seconds global cooldown for same alert type
+HANDS_UP_HEIGHT_THRESHOLD = 0.15  # Require hands to be at least 15% of body height above shoulders
+CONFIDENCE_THRESHOLD = 0.6  # Lower threshold for more detections
+BOTH_HANDS_REQUIRED = False  # Allow single hand to trigger alert
+
+# Time-based sensitivity
+REDUCED_SENSITIVITY_HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17]  # 8 AM - 5 PM
+
+# Alert state tracking
+last_alert_time = {}  # Global dict to track last alert time by type
+
+# Define blacklist regions (x1, y1, x2, y2) - normalized coordinates 0-1
+# These are regions where we ignore detections (e.g., known motion areas, TV screens, etc.)
+BLACKLIST_REGIONS = [
+    # Example: [0.1, 0.1, 0.3, 0.3]  # Top-left region - adjust based on your needs
+]
+
+def is_time_sensitive():
+    """Check if current time is during reduced sensitivity hours"""
+    current_hour = datetime.datetime.now().hour
+    return current_hour in REDUCED_SENSITIVITY_HOURS
+
+def is_in_blacklist_region(x, y, img_width, img_height):
+    """Check if a point is in any blacklist region"""
+    norm_x, norm_y = x / img_width, y / img_height
+    
+    for region in BLACKLIST_REGIONS:
+        x1, y1, x2, y2 = region
+        if x1 <= norm_x <= x2 and y1 <= norm_y <= y2:
+            return True
+    
+    return False
+
+def can_trigger_alert(alert_type):
+    """Global throttling for alerts based on type"""
+    global last_alert_time
+    
+    current_time = time.time()
+    cooldown_period = GLOBAL_ALERT_COOLDOWN
+    
+    # For testing, we'll make hands up alerts more frequent
+    if alert_type == "Hands_Up":
+        cooldown_period = 10  # Just 10 seconds between hands up alerts
+    
+    # For testing, disable time sensitivity
+    # if is_time_sensitive():
+    #     cooldown_period *= 1.5
+    
+    if alert_type in last_alert_time:
+        time_since_last = current_time - last_alert_time[alert_type]
+        if time_since_last < cooldown_period:
+            logger.info(f"Global throttling: {alert_type} alert suppressed (triggered {time_since_last:.1f}s ago, cooldown: {cooldown_period}s)")
+            return False
+    
+    # Update last alert time
+    last_alert_time[alert_type] = current_time
+    return True
 
 def hands_up_detect(poses_list):
     """
@@ -18,6 +79,11 @@ def hands_up_detect(poses_list):
         list: Indices of persons with hands up
     """
     alert_indices = []
+    
+    # Check global throttling first
+    if not can_trigger_alert("Hands_Up"):
+        logger.info(f"Global alert throttling active: Skipping analysis of {len(poses_list)} persons")
+        return []
     
     logger.info(f"Analyzing {len(poses_list)} persons for hands up pose")
     
@@ -42,8 +108,21 @@ def hands_up_detect(poses_list):
             logger.info(f"Person {i}: Pose confidence score: {confidence_score:.2f}")
             
             # Skip if confidence is too low (unreliable pose)
-            if confidence_score < 0.4:  # Threshold for reliable pose
-                logger.info(f"Person {i}: Low confidence score, skipping")
+            if confidence_score < CONFIDENCE_THRESHOLD:  # Stricter threshold
+                logger.info(f"Person {i}: Low confidence score ({confidence_score:.2f} < {CONFIDENCE_THRESHOLD}), skipping")
+                continue
+            
+            # Get image dimensions from any valid point
+            img_width, img_height = 1000, 1000  # Defaults
+            for kp in keypoints.values():
+                if kp.get("x", 0) > 0:
+                    img_width = max(img_width, kp.get("x", 0) * 2)
+                    img_height = max(img_height, kp.get("y", 0) * 2)
+            
+            # Check if any key parts are in blacklist regions
+            nose = keypoints.get("nose", {})
+            if nose and is_in_blacklist_region(nose.get("x", 0), nose.get("y", 0), img_width, img_height):
+                logger.info(f"Person {i}: In blacklist region, skipping")
                 continue
             
             # Get arm keypoints
@@ -93,8 +172,8 @@ def hands_up_detect(poses_list):
                 # Calculate how high above shoulder
                 shoulder_to_wrist_height = (left_shoulder["y"] - left_wrist["y"]) / max(pose_height, 1)
                 logger.info(f"Person {i}: Left wrist {shoulder_to_wrist_height:.2f} of body height above shoulder")
-                # Must be at least 10% of body height above shoulder
-                left_hand_up = left_hand_up and shoulder_to_wrist_height > 0.1
+                # Must meet height threshold
+                left_hand_up = left_hand_up and shoulder_to_wrist_height > HANDS_UP_HEIGHT_THRESHOLD
             
             right_hand_up = False
             if right_arm_complete and right_arm_aligned:
@@ -102,11 +181,18 @@ def hands_up_detect(poses_list):
                 # Calculate how high above shoulder
                 shoulder_to_wrist_height = (right_shoulder["y"] - right_wrist["y"]) / max(pose_height, 1)
                 logger.info(f"Person {i}: Right wrist {shoulder_to_wrist_height:.2f} of body height above shoulder")
-                # Must be at least 10% of body height above shoulder
-                right_hand_up = right_hand_up and shoulder_to_wrist_height > 0.1
+                # Must meet height threshold
+                right_hand_up = right_hand_up and shoulder_to_wrist_height > HANDS_UP_HEIGHT_THRESHOLD
+            
+            # Check if we need both hands up
+            hands_up_condition = False
+            if BOTH_HANDS_REQUIRED:
+                hands_up_condition = left_hand_up and right_hand_up
+            else:
+                hands_up_condition = left_hand_up or right_hand_up
             
             # Only consider valid hands up if pose confidence is good
-            if (left_hand_up or right_hand_up) and confidence_score >= 0.6:
+            if hands_up_condition and confidence_score >= CONFIDENCE_THRESHOLD:
                 logger.info(f"Person {i}: Valid hands up detected!")
                 alert_indices.append(i)
             else:
@@ -299,70 +385,86 @@ def is_keypoint_visible(x, y, visibility_score, threshold=0.1):
 
 def get_person_bboxes(poses_list):
     """
-    Calculate bounding boxes for each person based on keypoints
-    Handles zero visibility scores
+    Convert poses to bounding boxes around each person
     
     Args:
-        poses_list: List of poses in flat format
-    
+        poses_list: List of poses in format [x1,y1,v1,x2,y2,v2,...]
+        
     Returns:
-        list: Bounding boxes as [x1, y1, x2, y2]
+        list: List of bounding boxes in format [x1, y1, x2, y2]
     """
     bboxes = []
     
     for pose in poses_list:
-        # Extract coordinates (even with zero visibility)
-        points = []
-        for i in range(0, len(pose), 3):
-            x, y = pose[i:i+2]
-            if x > 0 and y > 0:  # Use only non-zero coordinates
-                points.append((x, y))
+        # Extract x, y coordinates
+        x_coords = []
+        y_coords = []
         
-        coords = np.array(points) if points else np.array([])
+        for j in range(0, min(51, len(pose)), 3):
+            x, y = pose[j], pose[j+1]
+            if x > 0 and y > 0:
+                x_coords.append(x)
+                y_coords.append(y)
         
-        if len(coords) > 2:  # Need at least a few points
-            # Get min/max coordinates
-            x_min = max(0, np.min(coords[:, 0]))
-            y_min = max(0, np.min(coords[:, 1]))
-            x_max = np.max(coords[:, 0])
-            y_max = np.max(coords[:, 1])
+        # Create bbox if enough points
+        if len(x_coords) >= 5 and len(y_coords) >= 5:
+            # Add some padding around the person
+            padding_x = (max(x_coords) - min(x_coords)) * 0.1
+            padding_y = (max(y_coords) - min(y_coords)) * 0.1
             
-            # Add padding
-            width = x_max - x_min
-            height = y_max - y_min
-            padding_x = width * 0.1
-            padding_y = height * 0.1
+            x1 = max(0, min(x_coords) - padding_x)
+            y1 = max(0, min(y_coords) - padding_y)
+            x2 = max(x_coords) + padding_x
+            y2 = max(y_coords) + padding_y
             
-            x_min = max(0, x_min - padding_x)
-            y_min = max(0, y_min - padding_y)
-            x_max += padding_x
-            y_max += padding_y
-            
-            bboxes.append([int(x_min), int(y_min), int(x_max), int(y_max)])
+            bboxes.append([x1, y1, x2, y2])
         else:
-            bboxes.append([0, 0, 10, 10])  # Small default box
+            # Invalid pose, add dummy bbox
+            bboxes.append([0, 0, 10, 10])
     
     return bboxes
 
-def draw_bboxes(image, bboxes, indices=None, color=(0, 0, 255), thickness=2):
-    """Draw bounding boxes on image"""
+def draw_bboxes(image, bboxes, indices=None, color=(0, 0, 255), thickness=2, label_prefix="Person"):
+    """
+    Draw bounding boxes on image for persons with hands up
+    
+    Args:
+        image: OpenCV image
+        bboxes: List of bounding boxes [x1, y1, x2, y2]
+        indices: Indices of bboxes to draw (for highlighting specific people)
+        color: Color for the bounding box (B, G, R)
+        thickness: Line thickness
+        label_prefix: Prefix for the label text
+        
+    Returns:
+        image: Image with boxes drawn
+    """
     result_image = image.copy()
     
+    # If no indices provided, draw all boxes
     if indices is None:
-        indices = range(len(bboxes))
+        indices = list(range(len(bboxes)))
     
-    for idx in indices:
-        if idx < len(bboxes):
-            x1, y1, x2, y2 = bboxes[idx]
+    for i in indices:
+        if i >= len(bboxes):
+            continue
             
-            # Skip invalid boxes
-            if x1 == 0 and y1 == 0 and x2 == 0 and y2 == 0:
-                continue
-                
-            cv2.rectangle(result_image, (x1, y1), (x2, y2), color, thickness)
+        bbox = bboxes[i]
+        if len(bbox) != 4:
+            continue
             
-            # Add text above the box
-            cv2.putText(result_image, "HANDS UP", (x1, max(y1 - 10, 20)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        x1, y1, x2, y2 = map(int, bbox)
+        
+        # Skip invalid boxes
+        if x1 >= x2 or y1 >= y2 or x1 < 0 or y1 < 0 or x2 <= 10 or y2 <= 10:
+            continue
+            
+        # Draw rectangle
+        cv2.rectangle(result_image, (x1, y1), (x2, y2), color, thickness)
+        
+        # Add label
+        label = f"{label_prefix} {i}"
+        cv2.putText(result_image, label, (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, thickness)
     
     return result_image
