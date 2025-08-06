@@ -1,2 +1,3 @@
 output_image/*
 logs/**/*.log
+videos/*.mp4
