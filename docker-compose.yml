@@ -1,6 +1,45 @@
 version: '3.8'
 
 services:
+  # Database service
+  db:
+    image: postgres:14-alpine # Use alpine for smaller footprint
+    ports:
+      - "5433:5432" # Changed to port 5433 on host to avoid conflict
+    volumes:
+      - ./database/pgdata:/var/lib/postgresql/data # Use local directory instead of named volume
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    environment:
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_DB=camera_system
+      - TZ=Asia/Kolkata
+      - PGTZ=Asia/Kolkata
+      # Reduce memory usage
+      - POSTGRES_SHARED_BUFFERS=32MB
+      - POSTGRES_EFFECTIVE_CACHE_SIZE=64MB
+      - POSTGRES_WORK_MEM=4MB
+      - POSTGRES_MAINTENANCE_WORK_MEM=16MB
+    command: >
+      postgres
+      -c shared_buffers=32MB
+      -c effective_cache_size=64MB
+      -c work_mem=4MB
+      -c maintenance_work_mem=16MB
+      -c max_connections=10
+      -c fsync=off
+      -c synchronous_commit=off
+      -c full_page_writes=off
+      -c timezone=Asia/Kolkata
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+          cpus: '0.5'
+    networks:
+      - pose-network
+    restart: unless-stopped
+
   camera-manager:
     build: 
       context: .
@@ -19,6 +58,7 @@ services:
       - CONFIG_DIR=/app/camera_manager/config
       - OUTPUT_DIR=/app/output_image
       - LOG_DIR=/app/logs
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/camera_system
     depends_on:
       - detector-pose
       - detector-detections
@@ -69,10 +109,29 @@ services:
     volumes:
       - ./output_image:/app/output_image:rw
       - ./logs:/app/logs:rw
+      - ./alert_logic:/app/alert_logic:rw  # Mount source code for development
     environment:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
       - LOG_DIR=/app/logs
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/camera_system
+    depends_on:
+      - db
+    networks:
+      - pose-network
+      
+  ui-service:
+    build:
+      context: .
+      dockerfile: ui_service/Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - ALERT_SERVICE_URL=http://alert-logic:8012
+      - CAMERA_SERVICE_URL=http://camera-manager:8010
+    depends_on:
+      - alert-logic
+      - camera-manager
     networks:
       - pose-network
 
@@ -80,3 +139,7 @@ services:
 
 networks:
   pose-network:
+
+# Define volumes properly even if we're not using named volumes
+volumes:
+  postgres_data: {}

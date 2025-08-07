@@ -13,6 +13,7 @@ RUN apt-get update && \
 # Copy and install requirements
 COPY detector_detections/requirements.txt requirements.txt
 RUN pip install --user --no-cache-dir -r requirements.txt && \
+    pip cache purge && \
     chmod -R 777 /root/.local
 
 # Stage 2: Runtime
@@ -20,7 +21,7 @@ FROM python:3.12-slim-bookworm
 
 WORKDIR /app
 
-# Install runtime dependencies for OpenCV
+# Install runtime dependencies for OpenCV (minimized)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     libglib2.0-0 \
@@ -30,7 +31,7 @@ RUN apt-get update && \
     libgl1-mesa-glx \
     ffmpeg \
     && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Create non-root user
 RUN useradd -m -u 1000 appuser && \

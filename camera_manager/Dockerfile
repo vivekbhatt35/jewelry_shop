@@ -30,6 +30,7 @@ RUN pip install --no-cache-dir 'numpy<2.0.0,>=1.23.5' && \
 # Copy application code
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser camera_manager/ camera_manager/
+COPY --chown=appuser:appuser database/db_utils/ database/db_utils/
 WORKDIR /app/camera_manager
 
 ENV PYTHONPATH=/app

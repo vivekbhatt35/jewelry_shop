@@ -8,7 +8,7 @@ import datetime
 logger = logging.getLogger("Alert-Logic")
 
 # Global alert throttling settings
-GLOBAL_ALERT_COOLDOWN = 30  # 30 seconds global cooldown for same alert type
+GLOBAL_ALERT_COOLDOWN = 0  # Temporarily disabled cooldown for testing
 HANDS_UP_HEIGHT_THRESHOLD = 0.15  # Require hands to be at least 15% of body height above shoulders
 CONFIDENCE_THRESHOLD = 0.6  # Lower threshold for more detections
 BOTH_HANDS_REQUIRED = False  # Allow single hand to trigger alert

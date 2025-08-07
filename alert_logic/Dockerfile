@@ -43,6 +43,7 @@ COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
 # Copy application code
 COPY --chown=appuser:appuser utils/ utils/
 COPY --chown=appuser:appuser alert_logic/ alert_logic/
+COPY --chown=appuser:appuser database/db_utils/ database/db_utils/
 WORKDIR /app/alert_logic
 
 ENV PATH=/home/appuser/.local/bin:$PATH

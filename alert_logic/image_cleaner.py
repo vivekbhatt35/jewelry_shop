@@ -21,25 +21,6 @@ class ImageCleaner:
         self.min_age_minutes = min_age_minutes
         logger.info(f"Image cleaner initialized for {image_dir}, min age: {min_age_minutes} minutes")
 
-    def get_alert_images_keys(self):
-        """Get a set of keys (camera_id_time) for all alert images."""
-        alert_images = {}
-        alert_pattern = os.path.join(self.image_dir, "alert_*.jpg")
-        
-        for alert_file in glob.glob(alert_pattern):
-            filename = os.path.basename(alert_file)
-            # Match new format: alert_CAM_001_123456_Hands_Up.jpg
-            match = re.search(r'alert_([A-Za-z0-9_]+)_([0-9]{6})_.*\.jpg', filename)
-            if match:
-                camera_id = match.group(1)
-                time_str = match.group(2)
-                key = f"{camera_id}_{time_str}"
-                alert_images[key] = alert_file
-                logger.debug(f"Alert found: {filename} (key: {key})")
-        
-        logger.info(f"Found {len(alert_images)} alert images")
-        return alert_images
-
     def is_older_than(self, file_path, minutes):
         """Check if a file is older than the specified number of minutes."""
         if not os.path.exists(file_path):
@@ -60,43 +41,12 @@ class ImageCleaner:
         logger.info(f"Found {len(source_files)} source images and {len(overlay_files)} overlay images older than {self.min_age_minutes} minutes")
         return source_files, overlay_files
 
-    def identify_unused_images(self, source_files, overlay_files, alert_images):
-        """Identify images without corresponding alerts."""
-        to_delete = []
-        
-        # Process source files
-        for file in source_files:
-            filename = os.path.basename(file)
-            # Match pattern: source_20250806_214752_CAM_002.png
-            match = re.search(r'source_([0-9]{8})_([0-9]{6})_([A-Za-z0-9_]+)\.([a-zA-Z]+)', filename)
-            if match:
-                date_str = match.group(1)
-                time_str = match.group(2)
-                camera_id = match.group(3)
-                
-                # Create key using camera_id and time to match alert format
-                key = f"{camera_id}_{time_str}"
-                
-                # Check if there's a corresponding alert
-                if key not in alert_images:
-                    to_delete.append(file)
-        
-        # Process overlay files
-        for file in overlay_files:
-            filename = os.path.basename(file)
-            # Match pattern: overlay_20250806_214752_CAM_002.png
-            match = re.search(r'overlay_([0-9]{8})_([0-9]{6})_([A-Za-z0-9_]+)\.([a-zA-Z]+)', filename)
-            if match:
-                date_str = match.group(1)
-                time_str = match.group(2)
-                camera_id = match.group(3)
-                
-                # Create key using camera_id and time to match alert format
-                key = f"{camera_id}_{time_str}"
-                
-                # Check if there's a corresponding alert
-                if key not in alert_images:
-                    to_delete.append(file)
+    def identify_unused_images(self, source_files, overlay_files, alert_images=None):
+        """Identify old source and overlay images that should be cleaned up."""
+        # Return all old files for deletion - we don't need to match with alerts
+        # since the alert creation endpoint handles that logic
+        to_delete = source_files + overlay_files
+        logger.info(f"Found {len(to_delete)} old images to delete")
         
         logger.info(f"Found {len(to_delete)} images to delete (no alerts associated)")
         return to_delete
@@ -127,20 +77,16 @@ class ImageCleaner:
         """Run the cleanup process."""
         logger.info(f"Starting image cleanup process, dry_run={dry_run}")
         
-        # Get alert images
-        alert_images = self.get_alert_images_keys()
-        
         # Find old images
         source_files, overlay_files = self.find_old_images()
         
-        # Identify unused images
-        to_delete = self.identify_unused_images(source_files, overlay_files, alert_images)
+        # Get all old files for deletion
+        to_delete = self.identify_unused_images(source_files, overlay_files)
         
         # Delete files
         deleted_count = self.delete_files(to_delete, dry_run)
         
-        logger.info(f"Cleanup complete. Alert images: {len(alert_images)}, "
-                   f"Source images: {len(source_files)}, "
+        logger.info(f"Cleanup complete. Source images: {len(source_files)}, "
                    f"Overlay images: {len(overlay_files)}, "
                    f"Images deleted: {deleted_count}")
         
