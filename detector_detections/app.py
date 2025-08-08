@@ -5,6 +5,7 @@ import numpy as np
 from datetime import datetime
 import pytz
 import asyncio
+import time
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
@@ -28,9 +29,13 @@ os.makedirs(MODEL_FOLDER, exist_ok=True)  # Ensure model folder exists
 # Update alert service URL to use environment variable
 ALERT_SERVICE_URL = os.getenv('ALERT_SERVICE_URL', 'http://alert-logic:8012/alert')
 
+# Control whether to keep non-alert images
+KEEP_NON_ALERT_IMAGES = os.getenv('KEEP_NON_ALERT_IMAGES', 'false').lower() == 'true'
+
 # Define classes of interest
 CLASSES_OF_INTEREST = [
-    "person", "knife", "scissors", "gun", "pistol", "rifle", "mask", "helmet", "backpack"
+    "person", "knife", "scissors", "gun", "pistol", "rifle", "mask", "helmet", "backpack", 
+    "person with weapon", "suspicious behavior", "weapon", "handgun", "firearm", "revolver"
 ]
 
 # Global model variable
@@ -40,7 +45,7 @@ def load_model():
     """Load YOLO model safely with fallback options"""
     global model
     try:
-        # First try to find a model in the models folder
+        # Use regular model path logic to find best.pt
         model_path = get_model_path(MODEL_FOLDER)
         if model_path:
             logger.info(f"Loading detection model from {model_path}")
@@ -69,9 +74,15 @@ def get_model_path(model_folder):
     if not os.path.exists(model_folder):
         os.makedirs(model_folder, exist_ok=True)
         return None
+    
+    # First priority: best.pt
+    best_pt_path = os.path.join(model_folder, "best.pt")
+    if os.path.exists(best_pt_path):
+        return best_pt_path
         
+    # Third priority: any .pt file
     for fname in os.listdir(model_folder):
-        if fname.endswith(".pt") and "yolo" in fname.lower():
+        if fname.endswith(".pt"):
             return os.path.join(model_folder, fname)
     return None
 
@@ -253,11 +264,29 @@ async def detect_from_image(
             logger.debug(f"Sending request to alert service: {ALERT_SERVICE_URL}")
             logger.debug(f"Alert payload image paths: source={source_path}, overlay={overlay_path}")
             
-            alert_response = requests.post(
-                ALERT_SERVICE_URL,
-                data=alert_payload,
-                timeout=10
-            )
+            # Implement retry logic for connecting to the alert service
+            max_retries = 3
+            retry_delay = 2  # seconds
+            
+            for retry in range(max_retries):
+                try:
+                    alert_response = requests.post(
+                        ALERT_SERVICE_URL,
+                        data=alert_payload,
+                        timeout=10
+                    )
+                    # If successful, break out of the retry loop
+                    break
+                except requests.exceptions.RequestException as e:
+                    if retry < max_retries - 1:
+                        logger.warning(f"Failed to connect to alert service (attempt {retry+1}/{max_retries}): {str(e)}")
+                        logger.info(f"Retrying in {retry_delay} seconds...")
+                        time.sleep(retry_delay)
+                        # Increase delay for next retry (exponential backoff)
+                        retry_delay *= 2
+                    else:
+                        # This will be caught by the outer exception handler
+                        raise
             
             if alert_response.status_code != 200:
                 logger.warning(f"Alert service returned non-200 status: {alert_response.status_code}")
@@ -266,6 +295,24 @@ async def detect_from_image(
             else:
                 response["alert_status"] = alert_response.json()
                 logger.info("Alert service response received successfully")
+                
+                # Check if alert was generated and delete images if no alert
+                if not KEEP_NON_ALERT_IMAGES:
+                    try:
+                        alert_result = alert_response.json()
+                        alert_type = alert_result.get("type_of_alert", "No_Alert")
+                        if alert_type == "No_Alert":
+                            logger.info("No alert was generated - cleaning up images")
+                            # Delete source image
+                            if os.path.exists(source_path):
+                                os.remove(source_path)
+                                logger.info(f"Deleted source image: {source_path}")
+                            # Delete overlay image if it exists
+                            if overlay_path and os.path.exists(overlay_path):
+                                os.remove(overlay_path)
+                                logger.info(f"Deleted overlay image: {overlay_path}")
+                    except Exception as e:
+                        logger.error(f"Error checking alert result: {str(e)}")
         except Exception as e:
             error_msg = f"Alert service error: {str(e)}"
             response["alert_status"] = {"error": error_msg}

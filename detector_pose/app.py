@@ -170,8 +170,30 @@ async def pose_from_image(
             data=alert_payload,
             timeout=10
         )
-        response["alert_status"] = alert_response.json()
-        logger.info("Alert service response received")
+        
+        # Get the response from the alert service
+        alert_result = alert_response.json()
+        response["alert_status"] = alert_result
+        
+        # Check if an alert was generated
+        alert_type = alert_result.get("type_of_alert", "No_Alert")
+        if alert_type == "No_Alert":
+            # No alert was generated, delete the source and overlay images to save disk space
+            logger.info("No alert generated, deleting source and overlay images")
+            try:
+                # Delete source image
+                if os.path.exists(source_path):
+                    os.remove(source_path)
+                    logger.info(f"Deleted source image: {source_path}")
+                
+                # Delete overlay image if it exists
+                if overlay_path and os.path.exists(overlay_path):
+                    os.remove(overlay_path)
+                    logger.info(f"Deleted overlay image: {overlay_path}")
+            except Exception as e:
+                logger.error(f"Error deleting unused images: {str(e)}")
+        else:
+            logger.info(f"Alert generated: {alert_type}, keeping images")
     except Exception as e:
         error_msg = f"Alert service error: {str(e)}"
         response["alert_status"] = {"error": error_msg}

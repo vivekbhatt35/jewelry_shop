@@ -267,22 +267,28 @@ async def create_alert(
                 logger.exception("Detailed overlay save exception:")
                 saved_overlay_path = None
         else:
+            # Check configuration to decide if we should keep non-alert images
+            keep_non_alert_images = os.environ.get("KEEP_NON_ALERT_IMAGES", "false").lower() == "true"
+            
             if not result_alerts:
-                logger.debug("No alerts detected - deleting source and overlay images")
-                
-                try:
-                    # Delete source image
-                    if os.path.exists(image_path):
-                        os.remove(image_path)
-                        logger.info(f"Deleted source image: {image_path}")
+                if keep_non_alert_images:
+                    logger.info("No alerts detected - keeping images due to KEEP_NON_ALERT_IMAGES=true")
+                else:
+                    logger.debug("No alerts detected - deleting source and overlay images")
                     
-                    # Delete overlay image if it exists
-                    if image_overlay and os.path.exists(image_overlay):
-                        os.remove(image_overlay)
-                        logger.info(f"Deleted overlay image: {image_overlay}")
-                except Exception as e:
-                    logger.error(f"Error deleting unused images: {str(e)}")
-                    logger.exception("Detailed image deletion exception:")
+                    try:
+                        # Delete source image
+                        if os.path.exists(image_path):
+                            os.remove(image_path)
+                            logger.info(f"Deleted source image: {image_path}")
+                        
+                        # Delete overlay image if it exists
+                        if image_overlay and os.path.exists(image_overlay):
+                            os.remove(image_overlay)
+                            logger.info(f"Deleted overlay image: {image_overlay}")
+                    except Exception as e:
+                        logger.error(f"Error deleting unused images: {str(e)}")
+                        logger.exception("Detailed image deletion exception:")
             elif base_img is None or base_img.size == 0:
                 logger.error("Cannot save overlay: base_img is None or empty")
 
@@ -399,12 +405,17 @@ def periodic_cleanup(interval_minutes=60, min_age_minutes=30):
             logger.exception("Detailed cleanup exception:")
 
 # Start the background cleanup thread
+# Get cleanup parameters from environment variables or use defaults
+cleanup_interval = int(os.environ.get("CLEANUP_INTERVAL_MINUTES", "15"))  # Run every 15 minutes by default
+min_file_age = int(os.environ.get("MIN_FILE_AGE_MINUTES", "10"))  # Clean files older than 10 minutes
+
 cleanup_thread = threading.Thread(
     target=periodic_cleanup, 
-    args=(60, 30),  # Run every 60 minutes, clean files older than 30 minutes
+    args=(cleanup_interval, min_file_age),
     daemon=True
 )
 cleanup_thread.start()
+logger.info(f"Background image cleanup task started (every {cleanup_interval} minutes, min age: {min_file_age} minutes)")
 logger.info("Background image cleanup task started")
 
 @app.post("/cleanup")

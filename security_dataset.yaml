@@ -1,0 +1,13 @@
+# YOLO v8 dataset configuration for security system
+path: /path/to/dataset  # Update with your actual dataset path
+train: images/train
+val: images/val
+test: images/test
+
+# Classes
+names:
+  0: person
+  1: weapon
+  2: helmet
+  3: mask
+  4: suspicious

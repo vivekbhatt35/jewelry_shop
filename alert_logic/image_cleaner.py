@@ -10,7 +10,7 @@ from utils.logger import setup_logger
 logger = setup_logger("Cleanup-Service")
 
 class ImageCleaner:
-    def __init__(self, image_dir="output_image", min_age_minutes=30):
+    def __init__(self, image_dir="output_image", min_age_minutes=10):
         """Initialize the image cleaner.
         
         Args:

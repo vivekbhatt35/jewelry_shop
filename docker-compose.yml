@@ -80,6 +80,7 @@ services:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
       - LOG_DIR=/app/logs
+      - KEEP_NON_ALERT_IMAGES=false
     networks:
       - pose-network
 
@@ -97,6 +98,9 @@ services:
       - PYTHONPATH=/app
       - OUTPUT_DIR=/app/output_image
       - LOG_DIR=/app/logs
+      - KEEP_NON_ALERT_IMAGES=false
+    depends_on:
+      - alert-logic
     networks:
       - pose-network
 
@@ -115,6 +119,9 @@ services:
       - OUTPUT_DIR=/app/output_image
       - LOG_DIR=/app/logs
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/camera_system
+      - KEEP_NON_ALERT_IMAGES=false  # Explicitly set to false to delete non-alert images
+      - CLEANUP_INTERVAL_MINUTES=15  # Run cleanup every 15 minutes
+      - MIN_FILE_AGE_MINUTES=10      # Delete files older than 10 minutes
     depends_on:
       - db
     networks:
