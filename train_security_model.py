@@ -56,7 +56,7 @@ def main():
     model.val()
     
     print("Training complete! Model saved to security_model/yolov8_security_detector")
-    print("Copy the best.pt file to detector_detections/models/ to use it in your system")
+    print("Copy the best.pt file to your model directory to use it in your system")
 
 if __name__ == "__main__":
     main()

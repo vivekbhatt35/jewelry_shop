@@ -6,7 +6,8 @@ from datetime import datetime
 import pytz
 import asyncio
 import time
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+import uuid
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from ultralytics import YOLO
 import requests
@@ -21,25 +22,37 @@ india_tz = pytz.timezone('Asia/Kolkata')
 
 app = FastAPI()
 
+# Constants
 MODEL_FOLDER = "models"
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'output_image')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(MODEL_FOLDER, exist_ok=True)  # Ensure model folder exists
 
 # Update alert service URL to use environment variable
 ALERT_SERVICE_URL = os.getenv('ALERT_SERVICE_URL', 'http://alert-logic:8012/alert')
 
-# Control whether to keep non-alert images
-KEEP_NON_ALERT_IMAGES = os.getenv('KEEP_NON_ALERT_IMAGES', 'false').lower() == 'true'
-
-# Define classes of interest
+# Define classes of interest based on our trained model
+# Model trained with classes: 0-person, 1-weapon, 2-suspicious, 3-helmet, 4-mask
 CLASSES_OF_INTEREST = [
-    "person", "knife", "scissors", "gun", "pistol", "rifle", "mask", "helmet", "backpack", 
-    "person with weapon", "suspicious behavior", "weapon", "handgun", "firearm", "revolver"
+    "person", "weapon", "suspicious", "helmet", "mask"
 ]
 
-# Global model variable
+# Detection confidence thresholds by class
+CONFIDENCE_THRESHOLDS = {
+    "person": 0.45,     # Higher threshold for common class
+    "weapon": 0.15,     # Very low threshold for critical class
+    "suspicious": 0.25, # Low threshold for suspicious behavior
+    "helmet": 0.35,     # Medium threshold
+    "mask": 0.35        # Medium threshold
+}
+
+# Global variables
 model = None
+
+def get_model_path(model_folder):
+    for fname in os.listdir(model_folder):
+        if fname.endswith(".pt"):
+            return os.path.join(model_folder, fname)
+    return None
 
 def load_model():
     """Load YOLO model safely with fallback options"""
@@ -63,35 +76,20 @@ def load_model():
             shutil.copy2(model.ckpt_path, dest_path)
             logger.info(f"Saved downloaded model to {dest_path}")
             
-        logger.info("Downloaded and loaded default model successfully")
+        logger.info("Default model loaded successfully")
         return True
+        
     except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
+        logger.error(f"Error loading model: {str(e)}")
+        logger.exception("Model loading error details:")
         return False
 
-def get_model_path(model_folder):
-    """Get the path to the YOLO model file"""
-    if not os.path.exists(model_folder):
-        os.makedirs(model_folder, exist_ok=True)
-        return None
-    
-    # First priority: best.pt
-    best_pt_path = os.path.join(model_folder, "best.pt")
-    if os.path.exists(best_pt_path):
-        return best_pt_path
-        
-    # Third priority: any .pt file
-    for fname in os.listdir(model_folder):
-        if fname.endswith(".pt"):
-            return os.path.join(model_folder, fname)
-    return None
-
-# Try to load the model at startup but don't fail if it can't be loaded
+# Try to load model at startup
 try:
-    load_model()
+    if not load_model():
+        logger.warning("Failed to load model at startup, will retry on first request")
 except Exception as e:
-    logger.error(f"Error during model loading: {str(e)}")
-    logger.info("Service will start without model and attempt to load it when needed")
+    logger.error(f"Error during startup model loading: {str(e)}")
 
 @app.get("/health")
 async def health_check():
@@ -204,11 +202,18 @@ async def detect_from_image(
                 
                 # Draw on overlay image
                 if output_image == 1:
-                    color = (0, 255, 0)  # Green for general objects
-                    if cls_name.lower() in ["gun", "knife", "scissors", "pistol", "rifle"]:
-                        color = (0, 0, 255)  # Red for weapons
-                    elif cls_name.lower() in ["mask", "helmet"]:
-                        color = (255, 0, 0)  # Blue for face coverings
+                    # Color mapping for our new class structure
+                    # 0-person: green, 1-weapon: red, 2-suspicious: orange, 3-helmet/4-mask: blue
+                    color_map = {
+                        "person": (0, 255, 0),     # Green for person
+                        "weapon": (0, 0, 255),     # Red for weapons
+                        "suspicious": (0, 165, 255),  # Orange for suspicious
+                        "helmet": (255, 0, 0),     # Blue for helmet
+                        "mask": (255, 0, 0)        # Blue for mask
+                    }
+                    
+                    # Get color based on class name or default to green
+                    color = color_map.get(cls_name.lower(), (0, 255, 0))
                         
                     cv2.rectangle(overlay_img, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(overlay_img, f"{cls_name} {conf:.2f}", 
@@ -282,42 +287,465 @@ async def detect_from_image(
                         logger.warning(f"Failed to connect to alert service (attempt {retry+1}/{max_retries}): {str(e)}")
                         logger.info(f"Retrying in {retry_delay} seconds...")
                         time.sleep(retry_delay)
-                        # Increase delay for next retry (exponential backoff)
-                        retry_delay *= 2
+                        retry_delay *= 2  # Exponential backoff
                     else:
-                        # This will be caught by the outer exception handler
-                        raise
+                        logger.error(f"Failed to connect to alert service after {max_retries} attempts: {str(e)}")
+                        logger.exception("Alert service connection error details:")
             
-            if alert_response.status_code != 200:
-                logger.warning(f"Alert service returned non-200 status: {alert_response.status_code}")
-                logger.warning(f"Response content: {alert_response.text[:1000]}")
-                response["alert_status"] = {"warning": f"Non-200 status: {alert_response.status_code}"}
-            else:
+            # Include alert response in the API response
+            try:
                 response["alert_status"] = alert_response.json()
-                logger.info("Alert service response received successfully")
-                
-                # Check if alert was generated and delete images if no alert
-                if not KEEP_NON_ALERT_IMAGES:
-                    try:
-                        alert_result = alert_response.json()
-                        alert_type = alert_result.get("type_of_alert", "No_Alert")
-                        if alert_type == "No_Alert":
-                            logger.info("No alert was generated - cleaning up images")
-                            # Delete source image
-                            if os.path.exists(source_path):
-                                os.remove(source_path)
-                                logger.info(f"Deleted source image: {source_path}")
-                            # Delete overlay image if it exists
-                            if overlay_path and os.path.exists(overlay_path):
-                                os.remove(overlay_path)
-                                logger.info(f"Deleted overlay image: {overlay_path}")
-                    except Exception as e:
-                        logger.error(f"Error checking alert result: {str(e)}")
+            except Exception as alert_parse_error:
+                logger.warning(f"Failed to parse alert response: {str(alert_parse_error)}")
+                response["alert_status"] = {"status": "error", "message": "Failed to parse alert service response"}
+            
         except Exception as e:
-            error_msg = f"Alert service error: {str(e)}"
-            response["alert_status"] = {"error": error_msg}
-            logger.error(error_msg)
-            logger.exception("Details:")
+            logger.error(f"Error forwarding to alert service: {str(e)}")
+            logger.exception("Alert forwarding error details:")
+            response["alert_status"] = {"status": "error", "message": str(e)}
 
-    # Single return statement
-    return JSONResponse(content=response)
+    return response
+
+@app.post("/camera_frame")
+async def process_camera_frame(
+    request: Request,
+    camera_id: str = Form(...),
+    timestamp: str = Form(...),
+    frame_id: str = Form(None)
+):
+    """
+    Process a frame from the camera manager service.
+    This endpoint is designed to be called by the camera_manager service.
+    """
+    try:
+        # Check if model is loaded
+        if model is None and not load_model():
+            logger.warning("Model not loaded, cannot process frame")
+            return JSONResponse(content={
+                "camera_id": camera_id,
+                "timestamp": timestamp,
+                "status": "error",
+                "message": "Detection model not available"
+            }, status_code=500)
+        
+        form = await request.form()
+        frame_file = form.get("frame")
+        
+        if not frame_file:
+            logger.error("No frame file provided in request")
+            return JSONResponse(content={
+                "camera_id": camera_id,
+                "status": "error",
+                "message": "No frame file provided"
+            }, status_code=400)
+        
+        # Create unique filename
+        frame_id = frame_id or str(uuid.uuid4())[:8]
+        timestamp_formatted = datetime.fromisoformat(timestamp.replace('Z', '+00:00')).strftime("%Y%m%d_%H%M%S") if 'T' in timestamp else timestamp
+        base_filename = f"{timestamp_formatted}_{camera_id}_{frame_id}.jpg"
+        temp_path = os.path.join(OUTPUT_DIR, f"temp_{base_filename}")
+        source_path = os.path.join(OUTPUT_DIR, f"source_{base_filename}")
+        
+        # Save the uploaded frame
+        contents = await frame_file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        
+        # Process image
+        img = cv2.imread(temp_path)
+        if img is None:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            logger.error(f"Failed to read frame image at {temp_path}")
+            return JSONResponse(content={
+                "status": "error",
+                "message": "Failed to read frame image"
+            }, status_code=400)
+        
+        # Save source image for alert service
+        cv2.imwrite(source_path, img)
+        
+        # Run inference
+        results = model(img)
+        
+        # Process results
+        detections = []
+        overlay_img = img.copy()
+        
+        result = results[0]
+        if hasattr(result, "boxes") and len(result.boxes) > 0:
+            boxes = result.boxes
+            for i, box in enumerate(boxes):
+                # Get box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                
+                # Get class info
+                cls_id = int(box.cls[0].item())
+                cls_name = result.names[cls_id]
+                conf = float(box.conf[0].item())
+                
+                # Apply class-specific confidence thresholds
+                threshold = CONFIDENCE_THRESHOLDS.get(cls_name.lower(), 0.35)
+                if conf < threshold:
+                    continue
+                
+                # Process detection if it's a class we're interested in
+                if cls_name.lower() in [c.lower() for c in CLASSES_OF_INTEREST]:
+                    logger.info(f"Detected {cls_name} in camera {camera_id} with confidence {conf:.2f}")
+                    
+                    # Add to detections
+                    detections.append({
+                        "class_id": cls_id,
+                        "class_name": cls_name,
+                        "confidence": conf,
+                        "bbox": [x1, y1, x2, y2]
+                    })
+                    
+                    # Color mapping for visualization
+                    color_map = {
+                        "person": (0, 255, 0),     # Green for person
+                        "weapon": (0, 0, 255),     # Red for weapons
+                        "suspicious": (0, 165, 255),  # Orange for suspicious
+                        "helmet": (255, 0, 0),     # Blue for helmet
+                        "mask": (255, 0, 0)        # Blue for mask
+                    }
+                    color = color_map.get(cls_name.lower(), (0, 255, 0))
+                    
+                    # Draw bounding box
+                    cv2.rectangle(overlay_img, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(overlay_img, f"{cls_name} {conf:.2f}", 
+                                (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Save overlay image
+        overlay_path = os.path.join(OUTPUT_DIR, f"overlay_{base_filename}")
+        cv2.imwrite(overlay_path, overlay_img)
+        
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # Prepare response
+        response = {
+            "camera_id": camera_id,
+            "timestamp": timestamp,
+            "frame_id": frame_id,
+            "detections": detections,
+            "source_image": source_path,
+            "overlay_image": overlay_path
+        }
+        
+        # Forward to alert service if there are detections
+        if detections:
+            try:
+                alert_payload = {
+                    "camera_id": camera_id,
+                    "detection_type": "objects",
+                    "date_time": timestamp,
+                    "image_source": source_path,
+                    "image_overlay": overlay_path,
+                    "detections": json.dumps(detections)
+                }
+                
+                # Send to alert service with retry logic
+                max_retries = 3
+                retry_delay = 1
+                
+                for retry in range(max_retries):
+                    try:
+                        alert_response = requests.post(
+                            ALERT_SERVICE_URL,
+                            data=alert_payload,
+                            timeout=5
+                        )
+                        break
+                    except requests.exceptions.RequestException as e:
+                        if retry < max_retries - 1:
+                            logger.warning(f"Alert service connection failed (attempt {retry+1}): {str(e)}")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            logger.error(f"Failed to connect to alert service: {str(e)}")
+                
+                # Include alert response
+                try:
+                    response["alert_status"] = alert_response.json()
+                except Exception as e:
+                    logger.warning(f"Failed to parse alert response: {str(e)}")
+                    response["alert_status"] = {"status": "unknown"}
+                
+            except Exception as e:
+                logger.error(f"Error forwarding to alert service: {str(e)}")
+                response["alert_status"] = {"status": "error", "message": str(e)}
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error processing camera frame: {str(e)}")
+        logger.exception("Details:")
+        return JSONResponse(content={
+            "camera_id": camera_id,
+            "status": "error",
+            "message": f"Internal error: {str(e)}"
+        }, status_code=500)
+
+@app.get("/model/classes")
+async def get_model_classes():
+    """
+    Get the classes supported by the loaded detection model.
+    This endpoint returns all available classes in the model as well as the subset of classes of interest.
+    """
+    # Check if model is loaded
+    if model is None:
+        if not load_model():
+            logger.warning("Failed to load model for class information")
+            return JSONResponse(content={
+                "status": "error",
+                "message": "Model not available",
+                "classes_of_interest": CLASSES_OF_INTEREST
+            }, status_code=500)
+    
+    try:
+        # Get the names dictionary from the model
+        if hasattr(model, 'names'):
+            all_classes = model.names
+            
+            # Convert the names dictionary to a more readable format
+            # The names dict has integer keys and string values
+            available_classes = {str(k): v for k, v in all_classes.items()}
+            
+            return {
+                "status": "success",
+                "model_path": model.ckpt_path if hasattr(model, 'ckpt_path') else "Unknown",
+                "all_classes": available_classes,
+                "classes_of_interest": CLASSES_OF_INTEREST,
+                "confidence_thresholds": CONFIDENCE_THRESHOLDS
+            }
+        else:
+            logger.warning("Model doesn't have 'names' attribute")
+            return JSONResponse(content={
+                "status": "error",
+                "message": "Model doesn't have class information",
+                "classes_of_interest": CLASSES_OF_INTEREST
+            }, status_code=500)
+            
+    except Exception as e:
+        logger.error(f"Error retrieving model classes: {str(e)}")
+        return JSONResponse(content={
+            "status": "error",
+            "message": f"Error retrieving model classes: {str(e)}",
+            "classes_of_interest": CLASSES_OF_INTEREST
+        }, status_code=500)
+
+@app.post("/detect/raw")
+async def detect_raw_output(
+    file: UploadFile = File(...),
+    conf: float = Form(0.1)  # Lower default confidence threshold to capture more detections
+):
+    """
+    Process an image with the YOLO model and return the raw detection results.
+    This endpoint returns all detections from the model without any filtering or post-processing.
+    """
+    # Check if model is loaded
+    if model is None:
+        if not load_model():
+            logger.warning("Model not loaded, cannot process image")
+            return JSONResponse(content={
+                "status": "error",
+                "message": "Model not available"
+            }, status_code=500)
+    
+    try:
+        # Save uploaded file to temp location
+        temp_path = os.path.join(OUTPUT_DIR, f"raw_temp_{uuid.uuid4()}.jpg")
+        contents = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        
+        # Read and process image
+        img = cv2.imread(temp_path)
+        if img is None:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return JSONResponse(content={
+                "error": "Failed to read uploaded image",
+                "path_checked": temp_path
+            }, status_code=400)
+        
+        # Process with YOLO using provided confidence threshold
+        results = model(img, conf=conf)
+        result = results[0]
+        
+        # Extract all detections
+        all_detections = []
+        
+        if hasattr(result, "boxes") and len(result.boxes) > 0:
+            boxes = result.boxes
+            for i, box in enumerate(boxes):
+                # Get box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                
+                # Get class info
+                cls_id = int(box.cls[0].item())
+                cls_name = result.names[cls_id]
+                conf = float(box.conf[0].item())
+                
+                all_detections.append({
+                    "class_id": cls_id,
+                    "class_name": cls_name,
+                    "confidence": conf,
+                    "bbox": [int(x1), int(y1), int(x2), int(y2)]
+                })
+        
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        return {
+            "status": "success",
+            "timestamp": datetime.now(india_tz).isoformat(),
+            "all_detections": all_detections,
+            "model_name": model.ckpt_path if hasattr(model, 'ckpt_path') else "Unknown",
+            "input_shape": img.shape
+        }
+    except Exception as e:
+        logger.error(f"Error in raw detection: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        return JSONResponse(content={
+            "status": "error",
+            "message": f"Error in raw detection: {str(e)}"
+        }, status_code=500)
+
+@app.post("/detect/all")
+async def detect_all_classes(
+    file: UploadFile = File(...),
+    min_conf: float = Form(0.01),  # Lower minimum confidence threshold
+    camera_id: str = Form("TEST_CAM"),
+    output_image: int = Form(1)  # Default to generating overlay image
+):
+    """
+    Process an image with the YOLO model and return detections for ALL classes,
+    regardless of the classes of interest filter, with configurable confidence threshold.
+    Also generates an overlay image with ALL detections.
+    """
+    # Check if model is loaded
+    if model is None:
+        if not load_model():
+            logger.warning("Model not loaded, cannot process image")
+            return JSONResponse(content={
+                "status": "error",
+                "message": "Model not available"
+            }, status_code=500)
+    
+    try:
+        # Create a timestamp-based filename
+        timestamp = datetime.now(india_tz).strftime("%Y%m%d_%H%M%S")
+        file_ext = os.path.splitext(file.filename)[1]
+        base_filename = f"{timestamp}_all_{camera_id}{file_ext}"
+        
+        # Define file paths
+        temp_path = os.path.join(OUTPUT_DIR, f"temp_{base_filename}")
+        source_path = os.path.join(OUTPUT_DIR, f"source_{base_filename}")
+        
+        # Save uploaded file
+        contents = await file.read()
+        with open(temp_path, "wb") as f:
+            f.write(contents)
+        
+        # Read and process image
+        img = cv2.imread(temp_path)
+        if img is None:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+            return JSONResponse(content={
+                "error": "Failed to read uploaded image",
+                "path_checked": temp_path
+            }, status_code=400)
+
+        # Save source image
+        cv2.imwrite(source_path, img)
+        
+        # Process with YOLO using provided confidence threshold
+        results = model(img, conf=min_conf)
+        result = results[0]
+        
+        # Extract all detections without filtering by class
+        all_detections = []
+        overlay_img = img.copy()
+        
+        if hasattr(result, "boxes") and len(result.boxes) > 0:
+            boxes = result.boxes
+            for i, box in enumerate(boxes):
+                # Get box coordinates
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                
+                # Get class info
+                cls_id = int(box.cls[0].item())
+                cls_name = result.names[cls_id]
+                conf = float(box.conf[0].item())
+                
+                # Add ALL detections to the list
+                all_detections.append({
+                    "class_id": cls_id,
+                    "class_name": cls_name,
+                    "confidence": conf,
+                    "bbox": [x1, y1, x2, y2]
+                })
+                
+                # Draw ALL detections on overlay image
+                if output_image == 1:
+                    # Color mapping based on class
+                    color_map = {
+                        "person": (0, 255, 0),     # Green for person
+                        "weapon": (0, 0, 255),     # Red for weapons
+                        "suspicious": (0, 165, 255),  # Orange for suspicious
+                        "helmet": (255, 0, 0),     # Blue for helmet
+                        "mask": (255, 0, 0),       # Blue for mask
+                        "default": (255, 255, 0)   # Yellow for unknown classes
+                    }
+                    
+                    color = color_map.get(cls_name.lower(), color_map["default"])
+                    
+                    # Draw bounding box and label
+                    cv2.rectangle(overlay_img, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(overlay_img, f"{cls_name} {conf:.2f}", 
+                              (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        
+        # Save overlay image if requested
+        overlay_path = None
+        if output_image == 1:
+            overlay_name = f"all_overlay_{base_filename}"
+            overlay_path = os.path.join(OUTPUT_DIR, overlay_name)
+            cv2.imwrite(overlay_path, overlay_img)
+            logger.debug(f"Saved ALL detections overlay image to {overlay_path}")
+        
+        # Clean up temp file
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        
+        # Return comprehensive response
+        response = {
+            "status": "success",
+            "camera_id": camera_id,
+            "timestamp": datetime.now(india_tz).isoformat(),
+            "all_detections": all_detections,
+            "classes_in_model": model.names if hasattr(model, 'names') else {},
+            "confidence_thresholds": CONFIDENCE_THRESHOLDS,
+            "source_image": source_path,
+            "min_confidence_used": min_conf,
+            "total_detections": len(all_detections)
+        }
+        
+        if overlay_path:
+            response["overlay_image_path"] = overlay_path
+            
+        return response
+    
+    except Exception as e:
+        logger.error(f"Error processing image for all detections: {str(e)}")
+        return JSONResponse(content={
+            "status": "error",
+            "message": f"Error processing image: {str(e)}"
+        }, status_code=500)

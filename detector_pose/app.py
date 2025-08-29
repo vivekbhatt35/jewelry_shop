@@ -45,7 +45,8 @@ logger.info("Model loaded successfully")
 async def pose_from_image(
     file: UploadFile = File(...),
     output_image: int = Form(0),
-    camera_id: str = Form(...)
+    camera_id: str = Form(...),
+    metadata: str = Form(None)
 ):
     logger.info(f"Processing image from camera {camera_id}")
     
@@ -163,6 +164,11 @@ async def pose_from_image(
             "image_overlay": overlay_path if overlay_path else None,
             "poses": json.dumps(poses)
         }
+        
+        # Pass metadata if available
+        if metadata:
+            alert_payload["metadata"] = metadata
+            logger.debug(f"Passing metadata to alert service: {metadata}")
         
         logger.debug(f"Sending request to alert service: {ALERT_SERVICE_URL}")
         alert_response = requests.post(

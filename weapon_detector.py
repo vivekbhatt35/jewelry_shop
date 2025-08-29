@@ -206,7 +206,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process video for weapon detection")
     parser.add_argument("input", help="Input video file path")
     parser.add_argument("output", help="Output video file path")
-    parser.add_argument("--model", "-m", default="detector_detections/models/best.pt", 
+    parser.add_argument("--model", "-m", default=None, 
                         help="Path to YOLO model file")
     parser.add_argument("--alert-dir", "-a", help="Directory to save alert frames")
     parser.add_argument("--conf", "-c", type=float, default=DEFAULT_CONF_THRESHOLD,

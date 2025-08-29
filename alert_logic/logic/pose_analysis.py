@@ -25,6 +25,29 @@ BLACKLIST_REGIONS = [
     # Example: [0.1, 0.1, 0.3, 0.3]  # Top-left region - adjust based on your needs
 ]
 
+# Camera angle configurations
+CAMERA_ANGLES = {
+    "overhead": {
+        "hands_up_enabled": False,
+        "confidence_threshold": 0.7
+    },
+    "high_angle": {
+        "hands_up_enabled": True,
+        "hands_up_threshold": 0.25,
+        "confidence_threshold": 0.7
+    },
+    "front": {
+        "hands_up_enabled": True,
+        "hands_up_threshold": 0.15,
+        "confidence_threshold": 0.6
+    },
+    "low_angle": {
+        "hands_up_enabled": True,
+        "hands_up_threshold": 0.1,
+        "confidence_threshold": 0.7
+    }
+}
+
 def is_time_sensitive():
     """Check if current time is during reduced sensitivity hours"""
     current_hour = datetime.datetime.now().hour
@@ -41,6 +64,25 @@ def is_in_blacklist_region(x, y, img_width, img_height):
     
     return False
 
+def get_camera_angle_settings(camera_id):
+    """Determine camera angle settings based on camera ID"""
+    camera_id_lower = camera_id.lower()
+    
+    # Check for specific cameras or camera names with angle indicators
+    if "overhead" in camera_id_lower or "ceiling" in camera_id_lower or "top" in camera_id_lower:
+        return CAMERA_ANGLES["overhead"]
+    elif "high" in camera_id_lower:
+        return CAMERA_ANGLES["high_angle"]
+    elif "low" in camera_id_lower:
+        return CAMERA_ANGLES["low_angle"]
+    
+    # Special case for CAM_002 which we know is overhead
+    if camera_id_lower == "cam_002":
+        return CAMERA_ANGLES["overhead"]
+    
+    # Default to front-facing camera
+    return CAMERA_ANGLES["front"]
+
 def can_trigger_alert(alert_type):
     """Global throttling for alerts based on type"""
     global last_alert_time
@@ -52,10 +94,6 @@ def can_trigger_alert(alert_type):
     if alert_type == "Hands_Up":
         cooldown_period = 10  # Just 10 seconds between hands up alerts
     
-    # For testing, disable time sensitivity
-    # if is_time_sensitive():
-    #     cooldown_period *= 1.5
-    
     if alert_type in last_alert_time:
         time_since_last = current_time - last_alert_time[alert_type]
         if time_since_last < cooldown_period:
@@ -66,7 +104,7 @@ def can_trigger_alert(alert_type):
     last_alert_time[alert_type] = current_time
     return True
 
-def hands_up_detect(poses_list):
+def hands_up_detect(poses_list, camera_id="unknown", camera_angle=None):
     """
     Detect persons with hands up in poses list
     With improved validation for better accuracy
@@ -74,10 +112,26 @@ def hands_up_detect(poses_list):
     Args:
         poses_list: List of poses in format [x1,y1,v1,x2,y2,v2,...] 
                    where each pose has 17 keypoints x 3 values (x,y,v)
-    
+        camera_id: The camera ID for angle-specific settings
+        camera_angle: Optional explicit camera angle setting
+        
     Returns:
         list: Indices of persons with hands up
     """
+    # Get camera angle settings
+    settings = get_camera_angle_settings(camera_id)
+    logger.info(f"Processing hands up detection for camera {camera_id}")
+    
+    # Check if hands up detection is disabled for this camera angle
+    if not settings.get("hands_up_enabled", True):
+        logger.info(f"Hands up detection disabled for camera {camera_id} (overhead/ceiling camera)")
+        return []
+    
+    # Get thresholds from settings
+    hands_up_threshold = settings.get("hands_up_threshold", HANDS_UP_HEIGHT_THRESHOLD)
+    confidence_threshold = settings.get("confidence_threshold", CONFIDENCE_THRESHOLD)
+    logger.info(f"Using hands_up_threshold={hands_up_threshold}, confidence_threshold={confidence_threshold}")
+    
     alert_indices = []
     
     # Check global throttling first
@@ -108,182 +162,209 @@ def hands_up_detect(poses_list):
             logger.info(f"Person {i}: Pose confidence score: {confidence_score:.2f}")
             
             # Skip if confidence is too low (unreliable pose)
-            if confidence_score < CONFIDENCE_THRESHOLD:  # Stricter threshold
-                logger.info(f"Person {i}: Low confidence score ({confidence_score:.2f} < {CONFIDENCE_THRESHOLD}), skipping")
-                continue
-            
-            # Get image dimensions from any valid point
-            img_width, img_height = 1000, 1000  # Defaults
-            for kp in keypoints.values():
-                if kp.get("x", 0) > 0:
-                    img_width = max(img_width, kp.get("x", 0) * 2)
-                    img_height = max(img_height, kp.get("y", 0) * 2)
-            
-            # Check if any key parts are in blacklist regions
-            nose = keypoints.get("nose", {})
-            if nose and is_in_blacklist_region(nose.get("x", 0), nose.get("y", 0), img_width, img_height):
-                logger.info(f"Person {i}: In blacklist region, skipping")
-                continue
-            
-            # Get arm keypoints
-            left_wrist = keypoints.get("left_wrist", {})
-            right_wrist = keypoints.get("right_wrist", {})
-            left_elbow = keypoints.get("left_elbow", {})
-            right_elbow = keypoints.get("right_elbow", {})
-            left_shoulder = keypoints.get("left_shoulder", {})
-            right_shoulder = keypoints.get("right_shoulder", {})
-            
-            # Skip if any required part is missing
-            left_arm_complete = (left_wrist.get("x", 0) > 0 and 
-                               left_elbow.get("x", 0) > 0 and 
-                               left_shoulder.get("x", 0) > 0)
-            
-            right_arm_complete = (right_wrist.get("x", 0) > 0 and 
-                                right_elbow.get("x", 0) > 0 and 
-                                right_shoulder.get("x", 0) > 0)
-            
-            # Calculate body dimensions
-            all_x_coords = [kp.get("x", 0) for kp in keypoints.values() if kp.get("x", 0) > 0]
-            all_y_coords = [kp.get("y", 0) for kp in keypoints.values() if kp.get("y", 0) > 0]
-            
-            if not all_x_coords or not all_y_coords:
-                logger.info(f"Person {i}: Not enough valid keypoints")
+            if confidence_score < confidence_threshold:
+                logger.info(f"Person {i}: Low confidence score ({confidence_score:.2f} < {confidence_threshold}), skipping")
                 continue
                 
-            # Body dimensions
-            pose_width = max(all_x_coords) - min(all_x_coords)
-            pose_height = max(all_y_coords) - min(all_y_coords)
-            body_ratio = pose_height / max(pose_width, 1)
+            # Check if either hand is raised
+            left_hand_up = is_hand_raised(keypoints, "left", hands_up_threshold)
+            right_hand_up = is_hand_raised(keypoints, "right", hands_up_threshold)
             
-            # Check arms alignment
-            left_arm_aligned = check_arm_alignment(left_shoulder, left_elbow, left_wrist)
-            right_arm_aligned = check_arm_alignment(right_shoulder, right_elbow, right_wrist)
-            
-            logger.info(f"Person {i}: Left arm aligned: {left_arm_aligned}, Right arm aligned: {right_arm_aligned}")
-            
-            # For hands up, we need:
-            # 1. Wrists above shoulders
-            # 2. Arms properly aligned (elbow between shoulder and wrist)
-            # 3. Reasonable body proportions
-            
-            left_hand_up = False
-            if left_arm_complete and left_arm_aligned:
-                left_hand_up = left_wrist["y"] < left_shoulder["y"]
-                # Calculate how high above shoulder
-                shoulder_to_wrist_height = (left_shoulder["y"] - left_wrist["y"]) / max(pose_height, 1)
-                logger.info(f"Person {i}: Left wrist {shoulder_to_wrist_height:.2f} of body height above shoulder")
-                # Must meet height threshold
-                left_hand_up = left_hand_up and shoulder_to_wrist_height > HANDS_UP_HEIGHT_THRESHOLD
-            
-            right_hand_up = False
-            if right_arm_complete and right_arm_aligned:
-                right_hand_up = right_wrist["y"] < right_shoulder["y"]
-                # Calculate how high above shoulder
-                shoulder_to_wrist_height = (right_shoulder["y"] - right_wrist["y"]) / max(pose_height, 1)
-                logger.info(f"Person {i}: Right wrist {shoulder_to_wrist_height:.2f} of body height above shoulder")
-                # Must meet height threshold
-                right_hand_up = right_hand_up and shoulder_to_wrist_height > HANDS_UP_HEIGHT_THRESHOLD
-            
-            # Check if we need both hands up
-            hands_up_condition = False
-            if BOTH_HANDS_REQUIRED:
-                hands_up_condition = left_hand_up and right_hand_up
-            else:
-                hands_up_condition = left_hand_up or right_hand_up
-            
-            # Only consider valid hands up if pose confidence is good
-            if hands_up_condition and confidence_score >= CONFIDENCE_THRESHOLD:
-                logger.info(f"Person {i}: Valid hands up detected!")
+            # Decide if this is a hands up pose
+            # If we require both hands up, check both. Otherwise, check if either hand is up
+            if BOTH_HANDS_REQUIRED and left_hand_up and right_hand_up:
+                logger.info(f"Person {i}: BOTH hands up detected")
                 alert_indices.append(i)
-            else:
-                logger.info(f"Person {i}: No valid hands up detected")
+            elif not BOTH_HANDS_REQUIRED and (left_hand_up or right_hand_up):
+                logger.info(f"Person {i}: Hand(s) up detected (Left: {left_hand_up}, Right: {right_hand_up})")
+                alert_indices.append(i)
     
-    # Filter any duplicate or overlapping detections
-    alert_indices = filter_overlapping_detections(poses_list, alert_indices)
-    
-    logger.info(f"Found {len(alert_indices)} persons with hands up: {alert_indices}")
+    # Return indices of persons with hands up
+    logger.info(f"Found {len(alert_indices)} persons with hands up")
     return alert_indices
+
+def get_keypoint_name(index):
+    """Map keypoint index to name"""
+    # COCO keypoints: https://cocodataset.org/#keypoints-2020
+    keypoint_names = [
+        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_hip", "right_hip",
+        "left_knee", "right_knee", "left_ankle", "right_ankle"
+    ]
+    if 0 <= index < len(keypoint_names):
+        return keypoint_names[index]
+    return f"unknown_{index}"
 
 def calculate_pose_confidence(keypoints):
     """
-    Calculate a confidence score for the pose based on keypoint presence and positions
+    Calculate overall confidence score for the pose
+    Weighted average of visibilities for key points
     
     Args:
         keypoints: Dictionary of keypoints
         
     Returns:
-        float: Confidence score between 0 and 1
+        float: Confidence score 0.0-1.0
     """
-    # Check if key body parts are present
-    core_parts = ["nose", "left_shoulder", "right_shoulder", "left_hip", "right_hip"]
-    core_parts_present = sum(1 for part in core_parts if keypoints.get(part, {}).get("x", 0) > 0)
+    key_points = ["nose", "left_shoulder", "right_shoulder", 
+                 "left_elbow", "right_elbow", "left_wrist", "right_wrist"]
     
-    # Check for arm parts
-    arm_parts = ["left_elbow", "right_elbow", "left_wrist", "right_wrist"]
-    arm_parts_present = sum(1 for part in arm_parts if keypoints.get(part, {}).get("x", 0) > 0)
+    confidences = []
+    weights = []
     
-    # Check for leg parts
-    leg_parts = ["left_knee", "right_knee", "left_ankle", "right_ankle"]
-    leg_parts_present = sum(1 for part in leg_parts if keypoints.get(part, {}).get("x", 0) > 0)
+    for point in key_points:
+        if point in keypoints:
+            visibility = keypoints[point]["v"]
+            
+            # Higher weight for shoulders and wrists (more important for hands up detection)
+            weight = 2.0 if "shoulder" in point or "wrist" in point else 1.0
+            confidences.append(visibility * weight)
+            weights.append(weight)
     
-    # Check for face parts
-    face_parts = ["left_eye", "right_eye", "left_ear", "right_ear"]
-    face_parts_present = sum(1 for part in face_parts if keypoints.get(part, {}).get("x", 0) > 0)
+    # If no valid keypoints found, return 0
+    if not confidences:
+        return 0.0
     
-    # Calculate symmetry (both sides of body should be roughly symmetric)
-    has_symmetry = is_pose_symmetric(keypoints)
-    
-    # Weighted scores
-    core_score = core_parts_present / len(core_parts) * 0.4  # 40% weight
-    arm_score = arm_parts_present / len(arm_parts) * 0.3     # 30% weight
-    leg_score = leg_parts_present / len(leg_parts) * 0.1     # 10% weight
-    face_score = face_parts_present / len(face_parts) * 0.1  # 10% weight
-    symmetry_score = 0.1 if has_symmetry else 0              # 10% weight
-    
-    total_score = core_score + arm_score + leg_score + face_score + symmetry_score
-    return min(1.0, total_score)  # Cap at 1.0
+    # Weighted average
+    return sum(confidences) / sum(weights) if sum(weights) > 0 else 0.0
 
-def is_pose_symmetric(keypoints):
-    """Check if pose has reasonable left/right symmetry"""
-    # Check if left and right sides are roughly symmetric
-    key_pairs = [
-        ("left_shoulder", "right_shoulder"),
-        ("left_hip", "right_hip"),
-        ("left_knee", "right_knee"),
-        ("left_ankle", "right_ankle")
-    ]
+def is_hand_raised(keypoints, side, height_threshold):
+    """
+    Check if hand (wrist) is raised above shoulder
     
-    symmetric_pairs = 0
-    for left_part, right_part in key_pairs:
-        left = keypoints.get(left_part, {})
-        right = keypoints.get(right_part, {})
+    Args:
+        keypoints: Dictionary of keypoints
+        side: "left" or "right"
+        height_threshold: Minimum vertical distance as percentage of body height
         
-        if left.get("x", 0) > 0 and right.get("x", 0) > 0:
-            symmetric_pairs += 1
-    
-    # Consider symmetric if at least half the pairs are present
-    return symmetric_pairs >= len(key_pairs) / 2
-
-def check_arm_alignment(shoulder, elbow, wrist):
-    """
-    Check if arm joints are in anatomically reasonable alignment
-    
     Returns:
-        bool: True if alignment is reasonable
+        bool: True if hand is raised, False otherwise
     """
-    # Skip check if any part is missing
-    if not (shoulder.get("x", 0) > 0 and elbow.get("x", 0) > 0 and wrist.get("x", 0) > 0):
+    shoulder_key = f"{side}_shoulder"
+    elbow_key = f"{side}_elbow"
+    wrist_key = f"{side}_wrist"
+    
+    # Need shoulder and wrist at minimum
+    if not all(k in keypoints for k in [shoulder_key, wrist_key]):
         return False
     
-    # Check X-coordinate: elbow should be between shoulder and wrist or close to that line
-    s_x, e_x, w_x = shoulder["x"], elbow["x"], wrist["x"]
-    s_y, e_y, w_y = shoulder["y"], elbow["y"], wrist["y"]
+    shoulder = keypoints[shoulder_key]
+    wrist = keypoints[wrist_key]
     
-    # Calculate angle between segments
-    vec1 = (e_x - s_x, e_y - s_y)
-    vec2 = (w_x - e_x, w_y - e_y)
+    # Check visibility/confidence thresholds
+    if shoulder["v"] < 0.5 or wrist["v"] < 0.5:
+        return False
     
-    # Check for zero length vectors
+    # Check if wrist is above shoulder
+    if wrist["y"] >= shoulder["y"]:  # y increases downward in image
+        return False
+    
+    # If elbow is available, do some additional validation
+    if elbow_key in keypoints and keypoints[elbow_key]["v"] > 0.3:
+        elbow = keypoints[elbow_key]
+        
+        # Check X-coordinate: elbow should be between shoulder and wrist or close to that line
+        s_x, e_x, w_x = shoulder["x"], elbow["x"], wrist["x"]
+        s_y, e_y, w_y = shoulder["y"], elbow["y"], wrist["y"]
+        
+        # Calculate angle between segments
+        vec1 = (e_x - s_x, e_y - s_y)
+        vec2 = (w_x - e_x, w_y - e_y)
+        
+        # Check for zero length vectors
+        len_vec1 = (vec1[0]**2 + vec1[1]**2)**0.5
+        len_vec2 = (vec2[0]**2 + vec2[1]**2)**0.5
+        
+        if len_vec1 > 0 and len_vec2 > 0:
+            # Calculate dot product and normalize
+            dot_product = (vec1[0] * vec2[0] + vec1[1] * vec2[1]) / (len_vec1 * len_vec2)
+            angle = np.arccos(np.clip(dot_product, -1.0, 1.0)) * 180 / np.pi
+            
+            # Angle should not be too sharp (arm should be somewhat straight)
+            if angle < 110:  # Allow some bend, but not too much
+                return False
+    
+    # Calculate body height (rough estimate)
+    body_height = 0
+    if "left_shoulder" in keypoints and "left_ankle" in keypoints:
+        shoulder_y = keypoints["left_shoulder"]["y"]
+        ankle_y = keypoints["left_ankle"]["y"]
+        body_height = max(body_height, ankle_y - shoulder_y)
+    
+    if "right_shoulder" in keypoints and "right_ankle" in keypoints:
+        shoulder_y = keypoints["right_shoulder"]["y"]
+        ankle_y = keypoints["right_ankle"]["y"]
+        body_height = max(body_height, ankle_y - shoulder_y)
+    
+    # If we couldn't calculate body height, use a pixel-based approach as fallback
+    if body_height <= 0:
+        # Return True if wrist is significantly above shoulder (at least 50px)
+        return (shoulder["y"] - wrist["y"]) > 50
+    
+    # Check if wrist is raised high enough above shoulder
+    # height_threshold is the percentage of body height
+    return (shoulder["y"] - wrist["y"]) > (height_threshold * body_height)
+
+def get_person_bboxes(poses_list):
+    """
+    Calculate bounding boxes for all persons in pose list
+    
+    Args:
+        poses_list: List of poses in format [x1,y1,v1,x2,y2,v2,...] 
+    
+    Returns:
+        list: List of bounding boxes as [x1, y1, x2, y2]
+    """
+    bboxes = []
+    
+    for pose in poses_list:
+        # Extract x,y coordinates from pose
+        points_x = []
+        points_y = []
+        
+        for i in range(0, len(pose), 3):
+            if i+2 < len(pose) and pose[i+2] > 0.1:  # Visibility threshold
+                points_x.append(pose[i])
+                points_y.append(pose[i+1])
+        
+        if points_x and points_y:
+            # Calculate bounding box with some padding
+            x1 = max(0, int(min(points_x)) - 20)
+            y1 = max(0, int(min(points_y)) - 20)
+            x2 = int(max(points_x)) + 20
+            y2 = int(max(points_y)) + 20
+            
+            bboxes.append([x1, y1, x2, y2])
+        else:
+            # Fallback empty box
+            bboxes.append([0, 0, 10, 10])
+    
+    return bboxes
+
+def draw_bboxes(image, bboxes, alert_indices, color=(0, 0, 255)):
+    """
+    Draw bounding boxes for specific person indices
+    
+    Args:
+        image: OpenCV image
+        bboxes: List of bounding boxes
+        alert_indices: List of indices to draw
+        color: Color as (B,G,R) tuple
+        
+    Returns:
+        image: Image with boxes drawn
+    """
+    result_image = image.copy()
+    
+    for i in alert_indices:
+        if 0 <= i < len(bboxes):
+            x1, y1, x2, y2 = bboxes[i]
+            cv2.rectangle(result_image, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(result_image, "Hands Up", (x1, y1-10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+    
+    return result_image
     len1 = (vec1[0]**2 + vec1[1]**2)**0.5
     len2 = (vec2[0]**2 + vec2[1]**2)**0.5
     

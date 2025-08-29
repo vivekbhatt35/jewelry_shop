@@ -7,6 +7,7 @@ import glob
 import configparser
 import requests
 import logging
+import json
 from datetime import datetime
 import pytz
 import uuid
@@ -57,6 +58,8 @@ class CameraConfig:
         self.source_type = self.config.get('camera', 'source_type', fallback='rtsp')
         # Add loop_video setting for video files
         self.loop_video = self.config.getboolean('camera', 'loop_video', fallback=True)
+        # Add camera angle setting
+        self.camera_angle = self.config.get('camera', 'camera_angle', fallback='front')
         
         # Analytics settings
         self.analytics_enabled = self.config.getboolean('analytics', 'enabled', fallback=True)
@@ -295,6 +298,33 @@ async def process_frame(camera_id, frame, config):
     except Exception as e:
         logger.error(f"Error processing frame from camera {camera_id}: {str(e)}")
 
+async def get_camera_angle(camera_id):
+    """Get camera angle from camera config"""
+    try:
+        config_dir = CONFIG_DIR
+        config_file = os.path.join(config_dir, f"{camera_id}.cfg")
+        
+        if not os.path.exists(config_file):
+            # Try to find a config file that contains this camera ID
+            config_files = glob.glob(os.path.join(config_dir, "*.cfg"))
+            for cf in config_files:
+                config = configparser.ConfigParser()
+                config.read(cf)
+                if 'camera' in config and 'camera_id' in config['camera'] and config['camera']['camera_id'] == camera_id:
+                    config_file = cf
+                    break
+        
+        if os.path.exists(config_file):
+            config = configparser.ConfigParser()
+            config.read(config_file)
+            
+            if 'camera' in config and 'camera_angle' in config['camera']:
+                return config['camera']['camera_angle']
+    except Exception as e:
+        logger.warning(f"Error getting camera angle: {str(e)}")
+    
+    return None
+
 async def send_to_pose_service(camera_id, image_path, timestamp):
     """Send image to pose detection service"""
     try:
@@ -303,6 +333,11 @@ async def send_to_pose_service(camera_id, image_path, timestamp):
             logger.error(f"Image file not found at {image_path}")
             return None
         
+        # Get camera angle if available
+        camera_angle = await get_camera_angle(camera_id)
+        if camera_angle:
+            logger.info(f"Using camera angle {camera_angle} for {camera_id}")
+        
         # Prepare the form data for multipart request (compatible with curl command format)
         form_data = aiohttp.FormData()
         form_data.add_field('file', open(image_path, 'rb'), 
@@ -310,6 +345,11 @@ async def send_to_pose_service(camera_id, image_path, timestamp):
                          content_type='image/png')
         form_data.add_field('output_image', '1')
         form_data.add_field('camera_id', camera_id)
+        
+        # Add camera angle metadata if available
+        if camera_angle:
+            metadata = json.dumps({'camera_angle': camera_angle})
+            form_data.add_field('metadata', metadata)
         
         logger.debug(f"Sending frame to pose service: {POSE_SERVICE_URL}")
         

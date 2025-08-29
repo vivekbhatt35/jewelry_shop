@@ -4,7 +4,7 @@ import logging
 
 logger = logging.getLogger("Alert-Logic")
 
-# Define alert types and their associated classes - Updated for new class structure
+# Define alert types and their associated classes
 ALERT_CATEGORIES = {
     "Weapon": ["weapon"],
     "Face_Covered": ["mask", "helmet"],
@@ -15,7 +15,7 @@ ALERT_CATEGORIES = {
 MONITORED_CLASSES = ["person"]
 
 # Define critical classes that always trigger alerts regardless of other conditions
-CRITICAL_CLASSES = ["weapon"]
+CRITICAL_CLASSES = ["weapon", "mask", "helmet", "suspicious"]
 
 def analyze_detections(detections):
     """
@@ -42,16 +42,16 @@ def analyze_detections(detections):
         class_name = detection.get("class_name", "").lower()
         confidence = detection.get("confidence", 0)
         
-        # Use an EXTREMELY low threshold for weapons (0.10) and regular threshold for other objects (0.35)
-        is_weapon = any(weapon.lower() in class_name.lower() for weapon in CRITICAL_CLASSES)
-        is_weapon_related = any(weapon.lower() in class_name.lower() for weapon in ALERT_CATEGORIES["Weapon"])
-        
-        if is_weapon:
-            threshold = 0.10  # Extremely low threshold for critical weapons
-            logger.info(f"Using critical weapon threshold of {threshold} for {class_name}")
-        elif is_weapon_related:
-            threshold = 0.15  # Very low threshold for weapon-related items
-            logger.info(f"Using weapon-related threshold of {threshold} for {class_name}")
+        # Define thresholds by class type
+        if class_name == "weapon":
+            threshold = 0.10  # Very low threshold for weapons
+            logger.info(f"Using weapon threshold of {threshold} for {class_name}")
+        elif class_name == "suspicious":
+            threshold = 0.25  # Low threshold for suspicious items
+            logger.info(f"Using suspicious threshold of {threshold} for {class_name}")
+        elif class_name == "mask" or class_name == "helmet":
+            threshold = 0.30  # Medium-low threshold for masks/helmets
+            logger.info(f"Using mask/helmet threshold of {threshold} for {class_name}")
         else:
             threshold = 0.35  # Normal threshold for everything else
         
@@ -60,36 +60,33 @@ def analyze_detections(detections):
             logger.info(f"Detection {i}: {class_name} has low confidence {confidence:.2f}, threshold {threshold}, skipping")
             continue
         
-        # Special case for weapons - always trigger an immediate alert
+        # CRITICAL FIX: Direct alerts for critical classes
         if class_name.lower() in [c.lower() for c in CRITICAL_CLASSES]:
-            # Add to alert indices directly - this is an immediate alert
-            alert_indices.append(i)
-            alert_types[i] = ["Weapon"]
-            logger.info(f"CRITICAL DETECTION: {i}: {class_name} directly triggered Weapon alert")
-            # Continue to process this detection for additional alerts
+            # Determine the alert type for this detection
+            alert_type = None
+            if class_name.lower() == "weapon":
+                alert_type = "Weapon"
+            elif class_name.lower() in ["mask", "helmet"]:
+                alert_type = "Face_Covered"
+            elif class_name.lower() == "suspicious":
+                alert_type = "Suspicious"
             
-        # Check which category this detection belongs to
+            # Add to alert indices directly - this is an immediate alert
+            if alert_type:
+                alert_indices.append(i)
+                alert_types[i] = [alert_type]
+                logger.info(f"CRITICAL DETECTION: {i}: {class_name} directly triggered {alert_type} alert with confidence {confidence:.2f}")
+        
+        # Track person detections
+        if class_name == "person":
+            person_detections.append(i)
+        
+        # Check which category this detection belongs to for other classes
         detected_alerts = []
         for alert_type, classes in ALERT_CATEGORIES.items():
             if class_name in [c.lower() for c in classes]:
                 detected_alerts.append(alert_type)
                 logger.info(f"Detection {i}: {class_name} triggered alert: {alert_type}")
-                
-                    # RELAXED LOGIC: Immediately trigger an alert for any weapon
-                if alert_type == "Weapon":
-                    if i not in alert_indices:
-                        alert_indices.append(i)
-                    if i not in alert_types:
-                        alert_types[i] = []
-                    if "Weapon" not in alert_types[i]:
-                        alert_types[i].append("Weapon")
-                    logger.warning(f"HIGH PRIORITY: {class_name} directly triggered Weapon alert with confidence {detection.get('confidence', 0):.2f}")        # Track person detections
-        if class_name == "person":
-            person_detections.append(i)
-            # RELAXED LOGIC: Add person directly to alerts (optional)
-            # alert_indices.append(i)
-            # alert_types[i] = ["Person_Alert"]
-            # logger.info(f"Relaxed logic: Person directly triggered alert")
         
         # If this is an alert object that's not already triggered, store it
         if detected_alerts and i not in alert_indices:
@@ -97,20 +94,16 @@ def analyze_detections(detections):
     
     logger.info(f"Found {len(person_detections)} persons and {len(alert_detections)} alert objects")
     
-    # Second pass: handle remaining alert objects and check for specific combinations
+    # Second pass: handle associations between persons and alert objects
     for alert_idx, alert_cats in alert_detections.items():
-        # Skip if this alert was already triggered in the first pass (weapons)
+        # Skip if this alert was already triggered in the first pass
         if alert_idx in alert_indices:
             continue
             
         alert_bbox = detections[alert_idx].get("bbox", [0, 0, 10, 10])
         class_name = detections[alert_idx].get("class_name", "").lower()
         
-        # Face covering alerts now require proximity to a person
-        # They will be handled in the person proximity check below
-        # No longer triggering face covering alerts independently
-                
-        # Check proximity for remaining suspicious items and to associate persons with alerts
+        # Check proximity for remaining alert objects and to associate persons with alerts
         if person_detections:
             # Check if this alert object is close to any person
             for person_idx in person_detections:
@@ -150,195 +143,146 @@ def analyze_detections(detections):
 
 def is_face_covering_worn(mask_bbox, person_bbox):
     """
-    Determine if a face covering is properly worn by a person
-    by checking if the mask/helmet is in the upper portion of the person bbox
-    and has significant overlap with where a face would typically be
+    Check if a face covering is properly worn by a person
     
     Args:
-        mask_bbox: Bounding box of mask/helmet as [x1, y1, x2, y2]
-        person_bbox: Bounding box of person as [x1, y1, x2, y2]
+        mask_bbox: [x, y, width, height] of mask/helmet
+        person_bbox: [x, y, width, height] of person
     
     Returns:
-        bool: True if the face covering appears to be worn, False otherwise
+        bool: True if the mask appears to be worn by the person
     """
     # Unpack bounding boxes
-    mx1, my1, mx2, my2 = mask_bbox
-    px1, py1, px2, py2 = person_bbox
+    mask_x, mask_y, mask_w, mask_h = mask_bbox
+    person_x, person_y, person_w, person_h = person_bbox
     
-    # Calculate dimensions
-    person_height = py2 - py1
-    person_width = px2 - px1
-    mask_height = my2 - my1
-    mask_width = mx2 - mx1
+    # Check if mask is in upper portion of the person bounding box
+    person_head_y = person_y + person_h * 0.3  # Approximate head position
     
-    # Skip if either box has invalid dimensions
-    if person_height <= 0 or person_width <= 0 or mask_height <= 0 or mask_width <= 0:
-        return False
-        
-    # 1. Check if mask is in upper 1/3 of person bounding box
-    person_upper_third = py1 + person_height/3
-    if my2 < py1 or my1 > person_upper_third:
-        return False  # Mask is not in upper third of person
+    # Check horizontal overlap
+    h_overlap = (mask_x < (person_x + person_w) and (mask_x + mask_w) > person_x)
     
-    # 2. Check horizontal alignment (mask should be centered within person width)
-    mask_center_x = (mx1 + mx2) / 2
-    person_center_x = (px1 + px2) / 2
-    horizontal_offset = abs(mask_center_x - person_center_x) / person_width
-    if horizontal_offset > 0.3:  # Allow some offset, but not too much
-        return False  # Mask is too far to the side
+    # Check if mask is in upper portion of person
+    v_position = mask_y < person_head_y
     
-    # 3. Size check - mask shouldn't be too large compared to person
-    if mask_width > person_width * 0.8 or mask_height > person_height * 0.5:
-        return False  # Mask is unrealistically large
-    
-    # 4. Check for reasonable overlap
-    # Calculate intersection
-    x_left = max(mx1, px1)
-    y_top = max(my1, py1)
-    x_right = min(mx2, px2)
-    y_bottom = min(my2, py2)
-    
-    if x_right > x_left and y_bottom > y_top:
-        intersection = (x_right - x_left) * (y_bottom - y_top)
-        mask_area = mask_width * mask_height
-        
-        # Mask should have significant overlap with person
-        if intersection / mask_area < 0.5:
-            return False  # Not enough overlap
-    else:
-        return False  # No overlap
-    
-    # All checks passed
-    return True
+    return h_overlap and v_position
 
-def are_objects_related(bbox1, bbox2, overlap_threshold=0.3, proximity_threshold=100):
+def are_objects_related(obj1_bbox, obj2_bbox):
     """
-    Determine if two objects are related based on overlap or proximity
+    Check if two objects are related (close to each other)
     
     Args:
-        bbox1, bbox2: Bounding boxes as [x1, y1, x2, y2]
-        overlap_threshold: Minimum overlap ratio to consider objects related
-        proximity_threshold: Maximum distance in pixels to consider objects related
+        obj1_bbox: [x, y, width, height] of first object
+        obj2_bbox: [x, y, width, height] of second object
     
     Returns:
-        bool: True if objects are related, False otherwise
+        bool: True if the objects are close to each other
     """
-    # Check for overlap
-    x1_1, y1_1, x2_1, y2_1 = bbox1
-    x1_2, y1_2, x2_2, y2_2 = bbox2
+    # Unpack bounding boxes
+    x1, y1, w1, h1 = obj1_bbox
+    x2, y2, w2, h2 = obj2_bbox
     
-    # Calculate intersection
-    x_left = max(x1_1, x1_2)
-    y_top = max(y1_1, y1_2)
-    x_right = min(x2_1, x2_2)
-    y_bottom = min(y2_1, y2_2)
-    
-    # If boxes overlap
-    if x_right > x_left and y_bottom > y_top:
-        intersection = (x_right - x_left) * (y_bottom - y_top)
-        area1 = (x2_1 - x1_1) * (y2_1 - y1_1)
-        area2 = (x2_2 - x1_2) * (y2_2 - y1_2)
-        smaller_area = min(area1, area2)
-        
-        if intersection / smaller_area > overlap_threshold:
-            return True
-    
-    # Check for proximity if they don't overlap significantly
     # Calculate centers
-    center1_x = (x1_1 + x2_1) / 2
-    center1_y = (y1_1 + y2_1) / 2
-    center2_x = (x1_2 + x2_2) / 2
-    center2_y = (y1_2 + y2_2) / 2
+    center_x1, center_y1 = x1 + w1/2, y1 + h1/2
+    center_x2, center_y2 = x2 + w2/2, y2 + h2/2
     
-    # Calculate Euclidean distance
-    distance = ((center1_x - center2_x) ** 2 + (center1_y - center2_y) ** 2) ** 0.5
+    # Calculate distance between centers
+    distance = ((center_x1 - center_x2)**2 + (center_y1 - center_y2)**2)**0.5
     
-    return distance < proximity_threshold
+    # Calculate diagonal of obj2 (person)
+    obj2_diagonal = (w2**2 + h2**2)**0.5
+    
+    # Objects are related if their distance is less than the diagonal of the person bbox
+    return distance < obj2_diagonal * 1.5
 
-def get_detection_bboxes(detections):
+def get_detection_bboxes(detections, alert_indices=None):
     """
-    Extract bounding boxes from detection list
+    Get bounding boxes from detections for visualization
     
     Args:
         detections: List of detection dictionaries
+        alert_indices: Optional list of detection indices that triggered alerts
     
     Returns:
-        list: Bounding boxes as [x1, y1, x2, y2]
+        list: List of bounding boxes and their associated classes/alerts
     """
-    return [detection.get("bbox", [0, 0, 10, 10]) for detection in detections]
+    bboxes = []
+    
+    # If alert_indices is None, include all detections
+    if alert_indices is None:
+        alert_indices = range(len(detections))
+    
+    for i, detection in enumerate(detections):
+        class_name = detection.get("class_name", "unknown")
+        confidence = detection.get("confidence", 0)
+        bbox = detection.get("bbox", [0, 0, 10, 10])
+        
+        # Only process detections in the alert indices
+        if i in alert_indices:
+            is_alert = True
+        else:
+            is_alert = False
+        
+        bboxes.append({
+            "bbox": bbox,
+            "class_name": class_name,
+            "confidence": confidence,
+            "is_alert": is_alert
+        })
+    
+    return bboxes
 
 def draw_detection_boxes(image, detections, indices=None, alert_types=None):
     """
-    Draw bounding boxes on image for detected objects with their alert types
+    Draw bounding boxes on an image
     
     Args:
         image: OpenCV image
         detections: List of detection dictionaries
-        indices: Indices of detections to draw, if None, draw all
-        alert_types: Dictionary mapping indices to alert types
+        indices: Optional list of detection indices that triggered alerts
+        alert_types: Optional mapping from indices to alert types
     
     Returns:
-        image: Image with boxes drawn
+        image: OpenCV image with bounding boxes drawn
     """
-    result_image = image.copy()
+    img_copy = image.copy()
     
+    # If no specific indices are provided, process all detections
     if indices is None:
         indices = range(len(detections))
     
-    if alert_types is None:
-        alert_types = {}
+    # Draw boxes for each detection
+    for i in indices:
+        if i >= len(detections):
+            continue
+            
+        detection = detections[i]
+        bbox = detection.get("bbox", [0, 0, 10, 10])
+        class_name = detection.get("class_name", "unknown")
+        confidence = detection.get("confidence", 0)
+        
+        # Determine alert status and types for this detection
+        is_alert = alert_types is not None and i in alert_types
+        alert_type_list = alert_types.get(i, []) if alert_types and i in alert_types else []
+        
+        x, y, w, h = bbox
+        
+        # Choose color: red for alerts, green otherwise
+        if is_alert:
+            color = (0, 0, 255)  # BGR: Red for alerts
+        else:
+            color = (0, 255, 0)  # BGR: Green for non-alerts
+        
+        # Draw the bounding box
+        cv2.rectangle(img_copy, (int(x), int(y)), (int(x + w), int(y + h)), color, 2)
+        
+        # Draw the label
+        if is_alert and alert_type_list:
+            label = f"{class_name}: {confidence:.2f} ({', '.join(alert_type_list)})"
+        else:
+            label = f"{class_name}: {confidence:.2f}"
+            
+        cv2.putText(img_copy, label, (int(x), int(y - 10)), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
     
-    for idx in indices:
-        if idx < len(detections):
-            detection = detections[idx]
-            bbox = detection.get("bbox", [0, 0, 0, 0])
-            class_name = detection.get("class_name", "")
-            conf = detection.get("confidence", 0)
-            
-            if len(bbox) < 4 or (bbox[0] == 0 and bbox[1] == 0 and bbox[2] == 0 and bbox[3] == 0):
-                continue
-                
-            x1, y1, x2, y2 = bbox
-            
-            # Set color based on alert type
-            color = (0, 255, 0)  # Default green for non-alert objects
-            
-            # If this detection has alert types, use them to determine color
-            if idx in alert_types:
-                alerts = alert_types[idx]
-                if "Weapon" in alerts:
-                    color = (0, 0, 255)  # Red for weapons
-                elif "Face_Covered" in alerts:
-                    color = (255, 0, 0)  # Blue for face coverings
-                elif "Suspicious" in alerts:
-                    color = (0, 165, 255)  # Orange for suspicious items
-            
-            # Draw rectangle with thicker border for alert objects
-            thickness = 3 if idx in alert_types else 1
-            cv2.rectangle(result_image, (x1, y1), (x2, y2), color, thickness)
-            
-            # Prepare label text with alert types
-            label_text = f"{class_name} {conf:.2f}"
-            if idx in alert_types:
-                if class_name.lower() == "person":
-                    # For persons, show what alert they're associated with
-                    alert_text = ", ".join(alert_types[idx])
-                    label_text = f"Person with {alert_text}"
-                else:
-                    # For alert objects, show the alert type
-                    alert_text = ", ".join(alert_types[idx])
-                    label_text = f"{alert_text}: {label_text}"
-            
-            # Draw label background
-            text_size, _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(result_image, 
-                         (x1, y1 - text_size[1] - 10), 
-                         (x1 + text_size[0], y1), 
-                         color, -1)
-            
-            # Draw label text
-            cv2.putText(result_image, label_text, 
-                       (x1, y1 - 5), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    
-    return result_image
+    return img_copy

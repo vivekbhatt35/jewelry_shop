@@ -7,7 +7,7 @@ import os
 from ultralytics import YOLO
 from alert_logic.logic.detection_analysis import analyze_detections, draw_detection_boxes
 
-def test_image(image_path, model_path='detector_detections/models/best.pt', conf_threshold=0.35):
+def test_image(image_path, model_path=None, conf_threshold=0.35):
     # Load model
     print(f"Loading model from {model_path}...")
     model = YOLO(model_path)

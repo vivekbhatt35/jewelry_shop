@@ -38,7 +38,7 @@ def main():
     
     input_video = sys.argv[1]
     output_video = sys.argv[2]
-    model_path = sys.argv[3] if len(sys.argv) > 3 else 'detector_detections/models/best.pt'
+    model_path = sys.argv[3] if len(sys.argv) > 3 else None
     conf_threshold = float(sys.argv[4]) if len(sys.argv) > 4 else 0.35
     weapon_conf_threshold = conf_threshold * 0.8  # Use lower threshold for weapons
     

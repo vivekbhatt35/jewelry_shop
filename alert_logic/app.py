@@ -1,7 +1,7 @@
-from fastapi import FastAPI, Form
+from fastapi import FastAPI, Form, Request
 from fastapi.responses import JSONResponse
 from logic.pose_analysis import hands_up_detect, get_person_bboxes, draw_bboxes
-from logic.detection_analysis import analyze_detections, get_detection_bboxes, draw_detection_boxes
+from logic.detection_analysis import analyze_detections, draw_detection_boxes
 from datetime import datetime
 import pytz
 import cv2
@@ -103,13 +103,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 @app.post("/alert")
 async def create_alert(
+    request: Request,
     camera_id: str = Form(...),
     detection_type: str = Form(...),
     date_time: str = Form(...),
     image_source: str = Form(...),
     image_overlay: str = Form(None),
     poses: str = Form(None),
-    detections: str = Form(None)
+    detections: str = Form(None),
+    metadata: str = Form(None)
 ):
     try:
         logger.info(f"Processing alert from camera {camera_id}, type: {detection_type}")
@@ -162,7 +164,19 @@ async def create_alert(
         if detection_type.lower() == "poses" and poses:
             # Process pose-based alerts (hands up)
             poses_list = json.loads(poses)
-            person_alert_indices = hands_up_detect(poses_list)
+            
+            # Extract camera angle from metadata if provided
+            camera_angle = None
+            if metadata:
+                try:
+                    metadata_dict = json.loads(metadata)
+                    camera_angle = metadata_dict.get('camera_angle')
+                    logger.info(f"Camera angle from metadata: {camera_angle}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse metadata: {str(e)}")
+            
+            # Pass camera ID and angle to hands_up_detect
+            person_alert_indices = hands_up_detect(poses_list, camera_id, camera_angle)
             
             if person_alert_indices:
                 result_alerts.append("Hands_Up")
@@ -200,7 +214,6 @@ async def create_alert(
                     logger.info(f"Alerts detected: {', '.join(result_alerts)}")
                     
                     # Draw bounding boxes for alerted objects
-                    detection_bboxes = get_detection_bboxes(detections_list)
                     base_img = draw_detection_boxes(base_img, detections_list, alert_indices, alert_types)
                     
                     # Collect bounding boxes for response
